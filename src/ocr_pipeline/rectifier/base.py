@@ -54,6 +54,7 @@ def build_rectifier(
     weights_path: str | None = None,
     device: str = "cpu",
     min_quad_area_ratio: float = 0.25,
+    min_confidence: float = 0.5,
     fallback_on_low_confidence: bool = True,
     **kwargs: Any,
 ) -> Rectifier:
@@ -63,6 +64,12 @@ def build_rectifier(
 
     `enabled=False` always returns an IdentityRectifier so callers can wire
     this through a single config flag without branching.
+
+    `min_confidence` is only consumed by ``HybridRectifier`` (the threshold
+    above which the primary backend's output is accepted). It is not
+    forwarded to the per-backend constructors, which makes the wiring
+    explicit and avoids the kwarg being silently dropped by the leaf
+    rectifiers.
     """
     if not enabled:
         return IdentityRectifier()
@@ -90,6 +97,7 @@ def build_rectifier(
             primary=primary,
             fallback=fallback,
             fallback_on_low_confidence=fallback_on_low_confidence,
+            min_confidence=min_confidence,
         )
 
     raise ValueError(f"Unknown rectifier backend: {backend!r}")

@@ -121,3 +121,11 @@ def test_build_rectifier_hybrid_default():
     assert isinstance(rect, HybridRectifier)
     assert isinstance(rect.primary, DocTrPlusRectifier)
     assert isinstance(rect.fallback, OpenCVRectifier)
+
+
+def test_build_rectifier_propagates_min_confidence_to_hybrid():
+    # Regression: min_confidence must reach HybridRectifier, not be silently
+    # dropped into the leaf-rectifier kwargs and discarded.
+    rect = build_rectifier(backend="hybrid", enabled=True, min_confidence=0.83)
+    assert isinstance(rect, HybridRectifier)
+    assert rect.min_confidence == 0.83
