@@ -35,6 +35,24 @@ class ExperimentConfig:
     vertical_padding_ratio: float = 0.35
     horizontal_padding_ratio: float = 0.60
     max_deskew_angle: float = 8.0
+    # Page-level document rectification (Phase 2C).
+    # When `enable_document_perspective_correction=True`, the pipeline runs
+    # a dewarping pass *before* line detection. `rectifier_backend` selects
+    # the algorithm; `rectifier_weights_path` points to a DocTr++ checkpoint
+    # if available (TorchScript / ONNX / state_dict). Missing weights
+    # silently degrade to the OpenCV fallback — they never crash the run.
+    rectifier_backend: str = "hybrid"
+    rectifier_weights_path: str | None = None
+    rectifier_device: str = "cpu"
+    rectifier_min_quad_area_ratio: float = 0.25
+    rectifier_max_quad_area_ratio: float = 0.95
+    rectifier_min_confidence: float = 0.5
+    # Paper-vs-background contrast gate (mean luminance difference, 0–255).
+    # Prevents the rectifier from latching onto the *printed inner rectangle*
+    # of an already-flat scan, which would falsely "rectify" the page by
+    # cropping off its margins.
+    rectifier_min_paper_background_contrast: float = 18.0
+    rectifier_save_debug: bool = True
     unsupported_options: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -59,8 +77,11 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     unsupported: list[str] = []
     if config.enable_deskew:
         unsupported.append("enable_deskew")
-    if config.enable_document_perspective_correction:
-        unsupported.append("enable_document_perspective_correction")
+    # `enable_document_perspective_correction` is now implemented by the
+    # `ocr_pipeline.rectifier` module (Phase 2C). It is no longer marked as
+    # unsupported. If the user requests `rectifier_backend="doctrpp"` but the
+    # weights file is missing, the HybridRectifier silently falls back to
+    # OpenCV at runtime; we don't fail config validation for that.
     config.unsupported_options = unsupported
     return config
 

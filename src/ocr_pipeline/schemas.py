@@ -194,6 +194,13 @@ class DebugPageResult(BaseModel):
     refined_boxes: list[BoundingBox] = Field(default_factory=list)
     decisions: list[DebugDetectionDecision] = Field(default_factory=list)
     final_crops: list[DebugCropPreview] = Field(default_factory=list)
+    # Phase 2C: page-level rectification debug.
+    rectifier_backend: Optional[str] = None
+    rectifier_applied: bool = False
+    rectifier_confidence: Optional[float] = None
+    rectifier_diagnostics: Optional[dict] = None
+    rectified_image_base64: Optional[str] = None
+    original_image_base64: Optional[str] = None
 
 
 class OCRDebugItem(BaseModel):

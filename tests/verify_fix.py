@@ -1,4 +1,3 @@
-import os
 import sys
 from pathlib import Path
 from PIL import Image, ImageDraw
@@ -14,7 +13,7 @@ def verify():
     output_path = "tests/output/verification_fixed.jpg"
     Path("tests/output").mkdir(parents=True, exist_ok=True)
     
-    print(f"Verifying with optimized settings:")
+    print("Verifying with optimized settings:")
     print(f"  thresh={settings.det_db_thresh}")
     print(f"  box_thresh={settings.det_db_box_thresh}")
     print(f"  unclip={settings.det_db_unclip_ratio}")

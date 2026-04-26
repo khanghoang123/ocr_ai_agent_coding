@@ -1,15 +1,13 @@
-import os
 import sys
 from pathlib import Path
 import cv2
-import numpy as np
 from PIL import Image
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 def test_structure(img_path, output_path):
-    from paddleocr import PPStructure, draw_structure_result, save_structure_res
+    from paddleocr import PPStructure, draw_structure_result
     
     # Initialize PPStructure
     # table=False if we only care about layout (titles, paragraphs)
@@ -32,8 +30,7 @@ def test_structure(img_path, output_path):
             # first_line = res['res'][0]['text']
             # print(f"  Sample Text: {first_line[:50]}...")
     
-    # Visualization
-    from paddleocr.utils.vis import draw_structure_result
+    # Visualization (draw_structure_result already imported above).
     # result is a list of dicts
     h, w, _ = img.shape
     im_show = draw_structure_result(img, result, font_path=None) # Default font

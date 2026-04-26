@@ -29,6 +29,7 @@ from ocr_pipeline.file_handlers import load_bytes, load_file
 from ocr_pipeline.layout.reconstructor import LayoutReconstructor
 from ocr_pipeline.recognizer.vietocr_recognizer import VietOCRRecognizer
 from ocr_pipeline.recognizer.vietnamese_postprocess import safe_postprocess_lines
+from ocr_pipeline.rectifier import IdentityRectifier, Rectifier, build_rectifier
 from ocr_pipeline.refiner.line_refiner import LineRefiner
 from ocr_pipeline.schemas import (
     BoundingBox,
@@ -58,6 +59,8 @@ class OCRPipeline:
         enable_vietnamese_postprocess: bool = False,
         flag_digit_noise: bool = False,
         unsupported_options: list[str] | None = None,
+        rectifier: Rectifier | None = None,
+        save_rectifier_debug: bool = True,
     ):
         self.detector = detector
         self.cropper = cropper
@@ -68,6 +71,8 @@ class OCRPipeline:
         self.enable_vietnamese_postprocess = enable_vietnamese_postprocess
         self.flag_digit_noise = flag_digit_noise
         self.unsupported_options = unsupported_options or []
+        self.rectifier: Rectifier = rectifier or IdentityRectifier()
+        self.save_rectifier_debug = save_rectifier_debug
 
     def process_file(self, file_path: str | Path) -> OCRResult:
         path = Path(file_path)
@@ -183,14 +188,49 @@ class OCRPipeline:
         page_number: int = 1,
         include_debug: bool = False,
     ) -> PageResult | tuple[PageResult, DebugPageResult]:
-        det_result = self.detector.detect_with_notebook_fallback(image)
+        # Phase 2C: page-level rectification BEFORE detection.
+        # The IdentityRectifier (default) is a no-op so this is free when
+        # `enable_document_perspective_correction=False`.
+        original_image = image
+        rect_result = self.rectifier.rectify(image)
+        rectified_image = rect_result.image
+        if rect_result.applied:
+            logger.info(
+                "Page %d: rectifier=%s applied=True confidence=%.3f size=%s→%s",
+                page_number,
+                rect_result.backend_used,
+                rect_result.confidence,
+                original_image.size,
+                rectified_image.size,
+            )
+        else:
+            logger.info(
+                "Page %d: rectifier=%s applied=False (%s)",
+                page_number,
+                rect_result.backend_used,
+                rect_result.diagnostics.get("reason") or rect_result.diagnostics.get("reason_for_fallback"),
+            )
+
+        # Detection runs on the rectified image; all downstream stages use
+        # rectified-image coordinates.
+        det_result = self.detector.detect_with_notebook_fallback(rectified_image)
         debug_page = DebugPageResult(
             page_number=page_number,
             raw_polygons=[
                 [[float(x), float(y)] for x, y in poly.reshape(-1, 2).tolist()]
                 for poly in det_result.polygons
             ],
+            rectifier_backend=rect_result.backend_used,
+            rectifier_applied=rect_result.applied,
+            rectifier_confidence=float(rect_result.confidence),
+            rectifier_diagnostics=dict(rect_result.diagnostics),
         )
+        if include_debug and self.save_rectifier_debug:
+            debug_page.original_image_base64 = self._encode_preview(original_image)
+            if rect_result.applied:
+                debug_page.rectified_image_base64 = self._encode_preview(rectified_image)
+        # Subsequent stages should see the (possibly rectified) image.
+        image = rectified_image
 
         if det_result.num_boxes == 0:
             logger.warning("Page %d: No text lines detected.", page_number)
@@ -302,6 +342,20 @@ class OCRPipeline:
 
         key = config.model_key or settings.get_default_model_key()
         model_cfg = settings.get_model_config(key)
+        rectifier = build_rectifier(
+            backend=getattr(config, "rectifier_backend", "hybrid"),
+            enabled=bool(getattr(config, "enable_document_perspective_correction", False)),
+            weights_path=getattr(config, "rectifier_weights_path", None),
+            device=getattr(config, "rectifier_device", "cpu"),
+            min_quad_area_ratio=float(getattr(config, "rectifier_min_quad_area_ratio", 0.25)),
+            min_confidence=float(getattr(config, "rectifier_min_confidence", 0.5)),
+            min_paper_vs_background_contrast=float(
+                getattr(config, "rectifier_min_paper_background_contrast", 18.0)
+            ),
+            max_quad_area_ratio=float(
+                getattr(config, "rectifier_max_quad_area_ratio", 0.95)
+            ),
+        )
         return cls(
             detector=PaddleDetector(
                 use_gpu=settings.det_use_gpu,
@@ -349,6 +403,8 @@ class OCRPipeline:
             enable_vietnamese_postprocess=config.enable_vietnamese_postprocess,
             flag_digit_noise=config.flag_digit_noise,
             unsupported_options=config.unsupported_options,
+            rectifier=rectifier,
+            save_rectifier_debug=bool(getattr(config, "rectifier_save_debug", True)),
         )
 
     def _apply_safe_postprocess(self, page_result: PageResult) -> PageResult:

@@ -25,7 +25,7 @@ class SymSpellCorrector:
         if self._dict_built:
             return
         try:
-            from symspellpy import SymSpell, Verbosity
+            from symspellpy import SymSpell, Verbosity  # noqa: F401
         except ImportError as e:
             raise PostProcessError(
                 "symspellpy is required for SymSpell post-processing. "

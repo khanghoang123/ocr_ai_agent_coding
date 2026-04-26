@@ -183,7 +183,8 @@ class LineCropper:
         half = n // 2
         top_pts = poly[:half]
         
-        if len(top_pts) < 3: return 0.0
+        if len(top_pts) < 3:
+            return 0.0
         
         # Fit a line to top points and check max distance
         x = top_pts[:, 0]

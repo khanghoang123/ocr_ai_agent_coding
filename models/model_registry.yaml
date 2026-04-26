@@ -1,0 +1,22 @@
+default: baseline_pretrained
+models:
+  baseline_pretrained:
+    name: VietOCR baseline (vgg_seq2seq pretrained)
+    display_name: VietOCR vgg_seq2seq (pretrained)
+    description: |
+      Public VietOCR vgg_seq2seq pretrained checkpoint
+      (https://vocr.vn/data/vietocr/vgg_seq2seq.pth). Used for the Phase 2C
+      rectification before/after eval as a stand-in for the project's own
+      fine-tuned `experiment_B_50k`, which is not present in this repo. The
+      hallucination patterns reported by the project (uppercase abbreviation
+      tokens, repeated 0/1 sequences) are present in this base model too —
+      the rectifier targets *geometry*, not the recognizer, so this is a
+      fair proxy for showing whether page-level rectification helps.
+    weights_path: models/vietocr_vgg_seq2seq.pt
+    architecture: vgg_seq2seq
+    image_height: 32
+    image_max_width: 690
+    image_min_width: 32
+    inference_only: true
+    status: ready
+    recommended: true

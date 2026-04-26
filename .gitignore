@@ -149,7 +149,13 @@ cython_debug/
 
 # Project specific
 .serena/
-models/
+# Model weights are excluded; small text manifests/configs in models/ are tracked.
+models/*
+!models/.gitkeep
+!models/*.yaml
+!models/*.yml
+!models/*.md
+!models/README*
 experiments/runs/
 experiments/leaderboard/
 data/
