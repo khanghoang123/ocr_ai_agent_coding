@@ -1,6 +1,4 @@
-import os
 import cv2
-import numpy as np
 from PIL import Image, ImageDraw
 from pathlib import Path
 import sys
@@ -11,10 +9,10 @@ from ocr_pipeline.detector.paddle_detector import PaddleDetector
 
 def apply_clahe(img_bgr):
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    l_chan, a_chan, b_chan = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    l = clahe.apply(l)
-    enhanced = cv2.merge((l, a, b))
+    l_chan = clahe.apply(l_chan)
+    enhanced = cv2.merge((l_chan, a_chan, b_chan))
     return cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
 
 def run_tournament():
@@ -35,7 +33,8 @@ def run_tournament():
     for img_path in image_files:
         print(f"Processing: {img_path.name}")
         img_bgr = cv2.imread(str(img_path))
-        if img_bgr is None: continue
+        if img_bgr is None:
+            continue
         
         h, w = img_bgr.shape[:2]
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)

@@ -3,12 +3,9 @@ Diagnostic script to visualize PaddleOCR detection boxes with current settings.
 Useful for debugging why detection is inaccurate (merging lines, noise, etc).
 """
 
-import os
 import sys
 from pathlib import Path
 
-import cv2
-import numpy as np
 from PIL import Image, ImageDraw
 
 # Add src to path

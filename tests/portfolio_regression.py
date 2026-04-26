@@ -17,12 +17,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ocr_pipeline.config import settings
-from ocr_pipeline.cropper.line_cropper import LineCropper
-from ocr_pipeline.detector.paddle_detector import PaddleDetector
-from ocr_pipeline.preprocess.notebook_preprocessor import NotebookPreprocessor
-from ocr_pipeline.recognizer.vietocr_recognizer import VietOCRRecognizer
-from ocr_pipeline.refiner.line_refiner import LineRefiner
+from ocr_pipeline.config import settings  # noqa: E402
+from ocr_pipeline.cropper.line_cropper import LineCropper  # noqa: E402
+from ocr_pipeline.detector.paddle_detector import PaddleDetector  # noqa: E402
+from ocr_pipeline.preprocess.notebook_preprocessor import NotebookPreprocessor  # noqa: E402
+from ocr_pipeline.recognizer.vietocr_recognizer import VietOCRRecognizer  # noqa: E402
+from ocr_pipeline.refiner.line_refiner import LineRefiner  # noqa: E402
 
 
 MANIFEST_PATH = ROOT / "tests" / "fixtures" / "portfolio_inference" / "manifest.json"

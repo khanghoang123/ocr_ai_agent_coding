@@ -299,7 +299,7 @@ class PaddleDetector:
             try:
                 res = self._ocr.ocr(img_np, cls=False, rec=False, det=True)
                 return self._parse_legacy_ocr_result(res)
-            except TypeError as e:
+            except TypeError:
                 try:
                     res = self._ocr.ocr(img_np)
                     return self._parse_legacy_ocr_result(res)
@@ -593,8 +593,10 @@ class PaddleDetector:
         if isinstance(conf_field, (int, float, np.floating)):
             return float(conf_field)
         if isinstance(conf_field, (tuple, list)) and len(conf_field) >= 2:
-            try: return float(conf_field[1])
-            except (TypeError, ValueError): return 1.0
+            try:
+                return float(conf_field[1])
+            except (TypeError, ValueError):
+                return 1.0
         return 1.0
 
     @staticmethod
