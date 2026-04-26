@@ -121,6 +121,21 @@ class OpenCVRectifier(Rectifier):
             )
 
         warped = self._warp_to_rectangle(rgb, quad)
+        if warped is None:
+            # Quad was found but the implied target rectangle is degenerate
+            # (≤32px on a side). Treat as "not applied" so downstream
+            # consumers don't think a no-op warp counts as a real rectification.
+            return RectifierResult(
+                image=image,
+                backend_used=self.name,
+                applied=False,
+                confidence=0.0,
+                diagnostics={
+                    "reason": "warp_target_too_small",
+                    "quad": quad.tolist(),
+                    "image_size": [w, h],
+                },
+            )
         result_img = from_numpy_rgb(warped)
         return RectifierResult(
             image=result_img,
@@ -247,7 +262,15 @@ class OpenCVRectifier(Rectifier):
         ordered[3] = pts[np.argmax(d)]   # bl
         return ordered
 
-    def _warp_to_rectangle(self, rgb: np.ndarray, quad: np.ndarray) -> np.ndarray:
+    def _warp_to_rectangle(
+        self, rgb: np.ndarray, quad: np.ndarray
+    ) -> np.ndarray | None:
+        """Warp ``rgb`` to a flat rectangle inferred from ``quad``.
+
+        Returns ``None`` when the implied target rectangle would be smaller
+        than 32px on a side — the caller treats this as ``applied=False``
+        rather than silently passing the original image through.
+        """
         tl, tr, br, bl = quad
         width_top = np.linalg.norm(tr - tl)
         width_bottom = np.linalg.norm(br - bl)
@@ -256,7 +279,7 @@ class OpenCVRectifier(Rectifier):
         target_w = int(round(max(width_top, width_bottom)))
         target_h = int(round(max(height_left, height_right)))
         if target_w < 32 or target_h < 32:
-            return rgb
+            return None
 
         # Cap at a sensible size so we don't blow up downstream.
         if max(target_w, target_h) > self.target_max_dim:

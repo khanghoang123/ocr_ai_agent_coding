@@ -219,29 +219,25 @@ def uppercase_garbage_token_rate(text: str) -> float:
     return uppercase_garbage_token_count(normalized) / len(tokens)
 
 
-_DATE_LIKE_RE = re.compile(
-    r"^(?:"
-    r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?"   # 1/2 or 12/3 or 12/03/2024
-    r"|\d{1,3}(?:[.,]\d{1,3})+"             # 1.234 or 12,345.67
-    r"|19\d{2}|20\d{2}"                      # 4-digit year
-    r")$"
-)
-
-
 def repeated_number_sequences(text: str) -> list[str]:
-    """Repeated 0/1 sequences and long digit runs that are not date-like.
+    """Repeated 0/1 sequences and long pure-digit runs.
 
     VietOCR's classic hallucination on noisy/curved crops is to emit long runs
     of '0' and '1' (its decoder collapses to high-frequency tokens). We also
-    flag any digit run ≥5 chars that doesn't fit a plausible number/date.
+    flag any pure-digit run of ≥5 characters as suspicious — Vietnamese
+    handwritten prose almost never contains 5+ consecutive bare digits, so on
+    this corpus a long bare-digit run is a reliable hallucination signal.
+
+    Date- and number-like strings (``12/03/2024``, ``1.234,56``, ``2024``) are
+    *not* matched by ``LONG_DIGIT_RUN_RE`` to begin with — the regex only
+    matches *bare* digit runs of length ≥5, so things containing ``/``, ``-``,
+    ``.``, ``,`` or that are ≤4 digits long never reach this function.
     """
     normalized = normalize_for_metric(text)
     matches: list[str] = []
     matches.extend(REPEATED_BINARY_RE.findall(normalized))
     for run in LONG_DIGIT_RUN_RE.findall(normalized):
         if run in matches:
-            continue
-        if _DATE_LIKE_RE.match(run):
             continue
         matches.append(run)
     return matches
