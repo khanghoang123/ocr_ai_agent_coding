@@ -1,0 +1,10 @@
+name: postprocess_on
+description: Enable safe Vietnamese postprocess and digit-noise flags.
+crop_padding_ratio: null
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: true
+flag_digit_noise: true
+debug: true

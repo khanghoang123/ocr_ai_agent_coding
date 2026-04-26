@@ -1,0 +1,14 @@
+name: baseline
+description: Current OCR pipeline defaults.
+model_key: null
+crop_padding: null
+crop_padding_ratio: null
+rectify_line: true
+enable_deskew: false
+enable_document_perspective_correction: false
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true

@@ -1,0 +1,10 @@
+name: upscale_on
+description: Force 1.5x detection upscale.
+crop_padding_ratio: null
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.5
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true

@@ -1,0 +1,10 @@
+name: crop_pad_003
+description: Dynamic crop padding at 3 percent of crop max dimension.
+crop_padding_ratio: 0.03
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true

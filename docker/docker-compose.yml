@@ -1,0 +1,70 @@
+version: "3.9"
+
+# ============================================================
+# Vietnamese Handwritten OCR — Docker Compose Stack
+#
+# Services:
+#   api      — FastAPI OCR backend (port 8000)
+#   frontend — Streamlit UI        (port 8501)
+#
+# Model weights are mounted via a local volume.
+# To use GPU for the API service, uncomment the `deploy` section.
+# ============================================================
+
+services:
+
+  # ── FastAPI OCR Backend ──────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: vn-ocr-api:latest
+    container_name: vn_ocr_api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount model weights from host (not baked into the image — too large)
+      - ../models/experiment_B:/app/models/experiment_B:ro
+      - ../models/baseline:/app/models/baseline:ro
+    environment:
+      - OCR_DEFAULT_MODEL=experiment_B
+      - OCR_REC_DEVICE=cpu         # Change to 'cuda' with GPU deploy section
+      - OCR_DET_USE_GPU=false
+      - OCR_API_HOST=0.0.0.0
+      - OCR_API_PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import requests; r=requests.get('http://localhost:8000/health'); exit(0 if r.ok else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s   # VietOCR can take ~60s to load first time
+      retries: 3
+
+    # ── Uncomment for GPU support ─────────────────────────────────────────
+    # NOTE: Requires nvidia-docker2 and paddlepaddle-gpu in requirements.txt
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ── Streamlit Frontend ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    image: vn-ocr-frontend:latest
+    container_name: vn_ocr_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - API_BASE=http://api:8000   # Internal Docker network name
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

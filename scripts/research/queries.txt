@@ -1,0 +1,9 @@
+# Default search queries (one per line).
+# You can pass this file via: --queries-file scripts/research/queries.txt
+
+vietnamese handwritten OCR post-processing
+handwritten text recognition language model rescoring
+OCR error correction sequence-to-sequence
+lexicon constrained decoding OCR beam search
+handwritten text recognition transformer decoder language model
+vietocr handwritten recognition

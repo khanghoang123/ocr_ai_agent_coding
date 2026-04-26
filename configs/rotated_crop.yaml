@@ -1,0 +1,13 @@
+name: rotated_crop
+description: Keep rotated/polygon perspective crop path enabled for geometry-sensitive pages.
+crop_padding_ratio: null
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true
+enable_noise_box_filter: false
+enable_rotated_crop: true
+debug_save_intermediate_crops: false

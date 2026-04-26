@@ -1,0 +1,45 @@
+# ============================================================
+# Vietnamese Handwritten OCR — Production Requirements
+# Python >= 3.9
+# ============================================================
+
+# ----- Core Deep Learning -----
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ----- OCR Model (VietOCR) -----
+vietocr>=0.3.6
+
+# ----- Text Detection (PaddleOCR) -----
+# Use CPU version in Docker / default environment.
+# For GPU inference, replace with: paddlepaddle-gpu>=2.5.0
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
+
+# ----- PDF support (PyMuPDF — no poppler needed) -----
+pymupdf>=1.23.0
+
+# ----- FastAPI backend -----
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9    # Required for FastAPI file uploads
+
+# ----- Streamlit frontend -----
+streamlit>=1.32.0
+requests>=2.31.0
+
+# ----- OCR post-processing -----
+symspellpy>=6.7.0
+transformers>=4.38.0
+sentencepiece>=0.1.99
+
+# ----- Image processing -----
+opencv-python-headless>=4.8.0,<4.13.0   # headless: no GUI deps needed in Docker
+Pillow>=10.0.0
+numpy>=1.24.0,<2.0.0
+
+# ----- Config & utilities -----
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+PyYAML>=6.0
+python-dotenv>=1.0.0

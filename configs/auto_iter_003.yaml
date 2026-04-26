@@ -1,0 +1,10 @@
+name: auto_iter_003_crop_pad_008
+description: AutoResearch perturbation from crop_pad_008.yaml
+crop_padding_ratio: 0.12
+rectify_line: true
+enable_local_contrast: false
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true

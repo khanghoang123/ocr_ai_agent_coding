@@ -1,0 +1,16 @@
+name: refine_noise_filter
+description: Conservative median-height noise filtering after detection.
+crop_padding_ratio: null
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true
+enable_noise_box_filter: true
+tiny_box_height_ratio: 0.45
+tiny_box_width_ratio: 0.08
+tiny_box_min_ink_occupancy: 0.01
+enable_rotated_crop: true
+debug_save_intermediate_crops: false
