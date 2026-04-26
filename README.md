@@ -1,320 +1,100 @@
-# Vietnamese Handwritten OCR Pipeline
+# Vietnamese Handwritten OCR with AutoResearch (Phase 2B)
 
-<div align="center">
+[![OCR Pipeline](https://img.shields.io/badge/Pipeline-AutoResearch-blueviolet)](https://github.com/khanghoang123/ocr_ai_agent_coding)
+[![Accuracy](https://img.shields.io/badge/Digit_Noise_Rate-2.62%25-green)](experiments/leaderboard/leaderboard.csv)
+[![Status](https://img.shields.io/badge/Status-Phase_2B-orange)](REPORT.md)
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue?style=flat-square&logo=python)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red?style=flat-square&logo=pytorch)
-![VietOCR](https://img.shields.io/badge/VietOCR-0.3.6-green?style=flat-square)
-![Gemini API](https://img.shields.io/badge/Gemini-Batch_API-orange?style=flat-square&logo=google)
+Dự án này tập trung vào việc xây dựng một hệ thống OCR (Nhận diện ký tự quang học) mạnh mẽ cho tiếng Việt viết tay, sử dụng quy trình nghiên cứu tự động (AutoResearch) để tối ưu hóa các tham số hình học và tiền xử lý.
 
-**An end-to-end pipeline for Vietnamese handwritten text recognition, featuring automated pseudo-labeling via Google Gemini Batch API and cross-validation with VietOCR.**
+## 🚀 Điểm nổi bật (Phase 2B)
 
-</div>
+Hệ thống đã chuyển từ một pipeline tĩnh sang một quy trình **Auto-Loop** có khả năng tự thử nghiệm và đánh giá:
 
----
+1.  **AutoResearch Engine**: Tự động tạo giả thuyết (perturbation), chạy thực nghiệm và cập nhật Leaderboard để tìm ra bộ cấu hình (`crop_padding`, `upscale`, `rectify_line`) tối ưu nhất.
+2.  **Geometry-Aware Refinement**:
+    *   **Deskew & Rectification**: Tự động căn chỉnh độ nghiêng và làm phẳng các dòng chữ bị cong.
+    *   **Validated Geometry**: Ràng buộc biên của dòng chữ dựa trên các dòng lân cận để tránh chồng lấn văn bản.
+    *   **Split Recovery**: Tự động phát hiện và tách các dòng bị dính (merged lines) dựa trên mật độ ink-occupancy và projection.
+3.  **Hybrid Detector**: Sử dụng PaddleOCR với cơ chế **OpenCV Row Projection Fallback** cực kỳ ổn định khi môi trường runtime gặp lỗi.
 
-## 📋 Table of Contents
+## 🔬 Chiến lược Dữ liệu & Phân tích Thực nghiệm
 
-- [Overview](#overview)
-- [Pipeline Architecture](#pipeline-architecture)
-- [Dataset Statistics](#dataset-statistics)
-- [Results](#results)
-- [Setup](#setup)
-- [Running the Pipeline](#running-the-pipeline)
-- [Project Structure](#project-structure)
+Ý tưởng chính của dự án là chứng minh việc **bổ sung dữ liệu bằng Pseudo-labeling** (kết hợp lọc tự động và sử dụng LLM như Gemini Flash để gán nhãn) giúp mô hình đạt hiệu suất tốt hơn trong điều kiện dữ liệu Ground Truth (GT) hạn chế.
 
----
+### 📊 So sánh 10k vs 50k Iterations
 
-## Overview
+| Cấu hình | Iterations | Test CER | Test EM | Nhận xét |
+|:---|:---:|:---:|:---:|:---|
+| Baseline (13k GT) | 10k | 4.38% | 32.50% | Hội tụ chậm hơn ở giai đoạn đầu. |
+| **Exp B (13k GT + 2.5k Pseudo)** | **10k** | **4.23%** | **32.80%** | **Thắng ở giai đoạn đầu** nhờ lượng dữ liệu lớn. |
+| **Baseline (13k GT)** | **50k** | **2.73%** | **50.46%** | **Thắng ở giai đoạn cuối** do bias vào tập GT. |
+| Exp B (13k GT + 2.5k Pseudo) | 50k | 2.98% | 46.55% | Bị nhiễu nhẹ từ pseudo-labels khi train quá lâu. |
 
-This project builds a production-quality OCR system for Vietnamese handwritten text by combining:
-1. **Supervised training** on curated handwritten datasets (UIT-HWDB, VNOnDB, VN Handwritten Images).
-2. **Self-supervised data augmentation** via an automated pseudo-labeling pipeline using **Google Gemini Batch API** and **VietOCR cross-validation**.
-3. **Comparative experiments** to measure the impact of pseudo-labeled data on model accuracy.
+### 💡 Phân tích & Giải thuyết
+*   **Hiệu quả ban đầu**: Ở 10k iterations, Experiment B vượt trội nhờ có thêm 2,500 mẫu pseudo-labels chất lượng cao, giúp mô hình học được nhiều pattern hơn trong thời gian ngắn.
+*   **Hiện tượng Bias/Distribution Alignment**: Vì tập **Test** được chia trực tiếp từ tập dữ liệu **Ground Truth**, nên khi huấn luyện lâu (50k iterations), mô hình Baseline (chỉ học GT) có xu hướng "fit" hoàn hảo vào phân phối của GT. 
+*   **Tác động của Pseudo-labels**: Dữ liệu pseudo-labels (dù đã được lọc) vẫn là nhãn "silver" (do AI gán). Khi train quá sâu, những sai số nhỏ hoặc sự khác biệt về phong cách gán nhãn giữa LLM và con người có thể tạo ra rào cản, khiến mô hình không thể đạt tới độ chính xác tuyệt đối như khi chỉ dùng dữ liệu "gold" GT trên chính tập test của nó.
 
----
+### 🚀 Hướng cải tiến tương lai
+*   **Nâng cấp Labeling**: Sử dụng các LLM mạnh hơn (Gemini 1.5 Pro, GPT-4o) để gán nhãn chính xác hơn cho các trường hợp chữ khó.
+*   **Advanced Filtering**: Áp dụng cơ chế **Confidence-based Filtering** (lọc dựa trên độ tin cậy của model) kết hợp với **Cross-Consistency Check** giữa nhiều model OCR khác nhau.
+*   **Domain Adaptation**: Thu thập thêm dữ liệu thực tế ngoài tập GT hiện tại để kiểm chứng khả năng tổng quát hóa (generalization) thực sự của Pseudo-labeling thay vì chỉ đánh giá trên tập test bị bias.
+*   **Active Learning**: Tự động phát hiện các mẫu mà model chưa tự tin để ưu tiên gán nhãn bằng con người hoặc LLM cấp cao.
 
-## Pipeline Architecture
+## 🛠️ Kiến trúc hệ thống
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     DATA PREPARATION                       │
-│                                                             │
-│  Dataset (16,363 images) ──► 01_eda ──► 02_data_prep       │
-│                                                   │         │
-│               ┌───────────────────────────────────┘         │
-│               ▼                                             │
-│        train: 13,090 │ val: 1,636 │ test: 1,637            │
-└─────────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  BASELINE TRAINING                         │
-│                                                             │
-│   03_train_baseline (ResNet + Transformer / VietOCR)       │
-│              ▼                                              │
-│   04_evaluate_baseline ──► models/baseline/best_model.pth  │
-└─────────────────────────────────────────────────────────────┘
-                    │
-┌─────────────────────────────────────────────────────────────┐
-│              PSEUDO-LABEL DATA PIPELINE                    │
-│                                                             │
-│  🌐 Crawl Images (internet)                                │
-│         │ 9,187 images crawled                             │
-│         ▼                                                   │
-│  05_crawl_and_detect (PaddleOCR text detection)            │
-│         │ 9,187 detected line crops                        │
-│         ▼                                                   │
-│  06_pseudo_label — Stage 1: Quality Filter                 │
-│         │ 9,187 → 5,103 passed (55.5% kept)               │
-│         ▼                                                   │
-│  06_pseudo_label — Stage 2: Gemini Batch API               │
-│         │ 5,103 → 4,040 labeled (Gemini Flash)             │
-│         ▼                                                   │
-│  06_pseudo_label — Stage 3: VietOCR Cross-Validation       │
-│         │ 4,040 → 2,503 final clean labels (61.9% kept)    │
-│         │ (similarity threshold: 0.70, mean sim: 0.73)     │
-└─────────────────────────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────────┐
-│              AUGMENTED TRAINING (Experiments)              │
-│                                                             │
-│  07_prepare_comparison_data                                │
-│         │                                                   │
-│  Experiment B: Ground Truth + Filtered Pseudo Labels       │
-│    ├── Ground truth:    13,090 samples                     │
-│    ├── Pseudo-labeled:   2,503 samples                     │
-│    └── TOTAL:           15,593 samples                     │
-│         ▼                                                   │
-│  08_train_experiment_B (Kaggle/Colab — GPU)                │
-│         ▼                                                   │
-│  models/experiment_B/best_model.pth                        │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    A[PDF/Image Source] --> B[Notebook Preprocessor]
+    B --> C[Hybrid Detector]
+    C -->|Paddle Fail| D[OpenCV Fallback]
+    C --> E[Line Refiner]
+    D --> E
+    E -->|Geometry Validation| F[Line Cropper]
+    F --> G[VietOCR Recognizer]
+    G --> H[Layout Reconstructor]
+    H --> I[Auto Post-Process]
+    
+    subgraph AutoResearch Loop
+    J[Leaderboard] --> K[Config Perturbator]
+    K --> L[Experiment Runner]
+    L --> J
+    end
 ```
 
----
+## 📂 Cấu trúc thư mục
 
-## Dataset Statistics
+*   `src/ocr_pipeline/`: Mã nguồn cốt lõi của pipeline (Detector, Refiner, Cropper).
+*   `configs/`: Chứa các file cấu hình YAML cho từng phiên bản thực nghiệm.
+*   `experiments/`:
+    *   `runs/`: Lưu trữ kết quả của từng lượt chạy (Crops, Metrics, Logs).
+    *   `leaderboard/`: Bảng xếp hạng các cấu hình tốt nhất.
+*   `scripts/`: Các script chạy thực nghiệm và AutoResearch.
 
-### Source Datasets (Baseline)
+## ⚙️ Hướng dẫn cài đặt & Sử dụng
 
-| Dataset | # Samples | Split |
-|---|---|---|
-| UIT-HWDB (line-level) | 7,229 | Train: 5,783 / Val: 723 / Test: 723 |
-| VNOnDB (line-level) | 7,296 | Train: 5,837 / Val: 729 / Test: 730 |
-| VN Handwritten Images | 1,838 | Train: 1,470 / Val: 184 / Test: 184 |
-| **Total** | **16,363** | **Train: 13,090 / Val: 1,636 / Test: 1,637** |
-
-### Pseudo-Labeling Pipeline
-
-| Stage | Input | Output | Retention |
-|---|---|---|---|
-| Web Crawl → Text Detection | — | 9,187 line crops | — |
-| Stage 1: Quality Filter | 9,187 | 5,103 | 55.5% |
-| Stage 2: Gemini Flash Labeling | 5,103 | 4,040 labeled | 79.2% |
-| Stage 3: VietOCR Cross-Validation (≥0.70) | 4,040 | 2,503 | 61.9% |
-
-### Training Sets
-
-| Experiment | Ground Truth | Pseudo Labels | Total |
-|---|---|---|---|
-| Baseline | 13,090 | 0 | 13,090 |
-| Experiment B | 13,090 | 2,503 | **15,593** |
-
----
-
-## Results
-
-> See [models/comparison_results.md](models/comparison_results.md) for full evaluation details.
-
-| Model | CER ↓ | WER ↓ | Full-match Acc ↑ |
-|---|---|---|---|
-| Pretrained VietOCR (zero-shot) | — | — | — |
-| Baseline (13K samples) | 4.38% | 11.76% | 32.50% |
-| Experiment B (+2,503 pseudo) | **2.98%** | **7.92%** | **46.55%** |
-
-*Weights available on request (Google Drive / HuggingFace) — see Setup below.*
-
----
-
-## Setup
-
-### 1. Clone the repository
+### 1. Cài đặt môi trường
 ```bash
-git clone https://github.com/your-username/vietnamese-handwritten-ocr.git
-cd vietnamese-handwritten-ocr
-```
-
-### 2. Create virtual environment
-```bash
-python -m venv venv
-source venv/bin/activate   # Linux/Mac
-# venv\Scripts\activate   # Windows
-```
-
-### 3. Install dependencies
-```bash
+conda create -n ocr_agent python=3.10
+conda activate ocr_agent
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
+### 2. Chạy thực nghiệm cơ bản
 ```bash
-cp .env.example .env
-# Edit .env with your API keys and paths
+python scripts/run_ocr_experiment.py --config configs/baseline.yaml --dataset data/processed/val.txt --output-dir experiments/runs/baseline
 ```
 
-### 5. Download datasets
-- **UIT-HWDB**: [Request from UIT](https://uitnlp.github.io/)
-- **VNOnDB**: [Available on request]
-- **VN Handwritten Images**: Included in this repo (small subset) or download from Drive.
-
-### 6. Download model weights *(optional)*
+### 3. Kích hoạt AutoResearch
 ```bash
-# Baseline model
-# gdown <DRIVE_LINK> -O models/baseline/best_model.pth
-
-# Experiment B model  
-# gdown <DRIVE_LINK> -O models/experiment_B/best_model.pth
+python scripts/auto_research.py --dataset data/processed/val.txt --iterations 5 --limit 10
 ```
+
+## 📝 Roadmap & Tiếp theo
+- [x] Triển khai Geometry-Aware Refinement (Phase 2A).
+- [x] Tích hợp AutoResearch Loop (Phase 2B).
+- [ ] Hoàn thiện Document Perspective Correction (Phase 3).
+- [ ] Tối ưu hóa tốc độ inference bằng ONNX/TensorRT.
 
 ---
-
-## Running the Pipeline
-
-Run notebooks **in numbered order**:
-
-| Order | Notebook | Environment | Purpose |
-|---|---|---|---|
-| 01 | `01_eda_dataset.ipynb` | Local | Explore dataset |
-| 02 | `02_data_preparation.ipynb` | Local | Prepare train/val/test splits |
-| 03 | `03_train_baseline.ipynb` | Colab/Kaggle (GPU) | Train baseline model |
-| 04 | `04_evaluate_baseline.ipynb` | Local/Colab | Evaluate baseline |
-| 05 | `05_crawl_and_detect_CLEANED.ipynb` | Local | Crawl & detect text lines |
-| 06 | `06_pseudo_label.ipynb` | Colab (needs API key) | Pseudo-label pipeline |
-| 07 | `07_prepare_comparison_data.ipynb` | Local | Merge data for experiments |
-| 08 | `08_train_experiment_B.ipynb` | Kaggle (GPU) | Train Experiment B |
-| 09 | `09_ocr_post_processing.ipynb` | Local/Colab | Evaluate Error Correction (SOTA Model & Dictionary) |
-
----
-
-## AutoResearch
-
-AutoResearch runs OCR hypotheses from YAML configs, records metrics, updates a leaderboard, and generates the next candidate config.
-
-### Install
-```bash
-pip install -r requirements.txt
-```
-
-For CI/lightweight unit tests:
-```bash
-pip install -r requirements-ci.txt
-```
-
-### Run Baseline
-```bash
-python scripts/run_ocr_experiment.py \
-  --config configs/baseline.yaml \
-  --dataset data/processed/val.txt \
-  --limit 10 \
-  --output-dir experiments/runs/baseline_smoke
-```
-
-### Run AutoResearch
-```bash
-python scripts/auto_research.py \
-  --dataset data/processed/val.txt \
-  --limit 10 \
-  --iterations 5
-```
-
-### View Results
-- Metrics: `experiments/runs/<run>/metrics.json`
-- Predictions: `experiments/runs/<run>/predictions.jsonl`
-- Leaderboard: `experiments/leaderboard/leaderboard.csv` and `experiments/leaderboard/leaderboard.json`
-- Report: `REPORT.md`
-
-### View Debug Crops And Overlays
-Each experiment run writes debug artifacts under:
-
-```text
-experiments/runs/<run>/debug/
-```
-
-Look for line crops in `debug/crops/`, overlay images ending in `_overlay.jpg`, and the line mapping in `debug/debug_mapping.json`.
-
-### Use The Best Config
-After AutoResearch finishes, pick the rank-1 config path from `experiments/leaderboard/leaderboard.csv`. Use that YAML with `scripts/run_ocr_experiment.py` for further validation. The API/frontend default response format is unchanged; these configs are intended for experiment runs unless explicitly wired into deployment.
-
----
-
-## Project Structure
-
-```
-ocr_ai_agent_coding/
-├── notebooks/
-│   ├── 01_eda_dataset.ipynb
-│   ├── 02_data_preparation.ipynb
-│   ├── 03_train_baseline.ipynb
-│   ├── 04_evaluate_baseline.ipynb
-│   ├── 05_crawl_and_detect_CLEANED.ipynb
-│   ├── 06_pseudo_label.ipynb
-│   ├── 07_prepare_comparison_data.ipynb
-│   ├── 08_train_experiment_B.ipynb
-│   ├── 09_ocr_post_processing.ipynb
-├── data/
-│   ├── configs/                     # Model config files
-│   ├── crawled/                     # Crawled data & pseudo-labels
-│   │   ├── detected_lines/          # [LARGE - not in Git] 115MB crops
-│   │   ├── pseudo_labels_final_clean.txt  # 2,503 clean pseudo labels
-│   │   └── phase2_clean_labels.txt  # 4,040 Gemini-labeled samples
-│   └── processed/                   # Annotation text files
-│       ├── train_annotation.txt     # 13,090 training samples
-│       ├── val_annotation.txt       # 1,636 validation samples
-│       ├── test.txt                 # 1,637 test samples
-│       ├── experiment_B_train.txt   # 15,593 samples (B)
-│
-├── Dataset/
-│   ├── data/                        # [LARGE - not in Git] 1.3GB source images
-│   └── labels.txt                   # 16,363 ground-truth labels
-│
-├── models/
-│   ├── baseline/                    # Weights NOT in Git (too large)
-│   │   ├── metrics.csv
-│   │   ├── loss_curve.png
-│   │   └── test_predictions.csv
-│   ├── experiment_B/
-│   │   ├── metrics.csv
-│   │   └── loss_curve.png
-│   ├── comparison_results.csv
-│   └── comparison_results.md
-│
-├── docs/
-│   └── VSCODE_COLAB_SETUP.md
-│
-├── .env.example                     # ← Copy to .env and fill secrets
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
-
----
-
-## Tech Stack
-
-| Component | Technology |
-|---|---|
-| OCR Model | [VietOCR](https://github.com/pbcquoc/vietocr) (ResNet + Transformer) |
-| Text Detection | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) |
-| Pseudo-Labeling | Google Gemini Flash (Batch API) |
-| Cross-Validation | VietOCR similarity scoring |
-| Training Platform | Kaggle / Google Colab (GPU) |
-| Framework | PyTorch |
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
+*Dự án được bảo trì bởi @khanghoang123.*
