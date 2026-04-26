@@ -36,7 +36,6 @@ lets the caller (HybridRectifier) fall back to OpenCV.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +251,6 @@ class DocTrPlusRectifier(Rectifier):
         import cv2
 
         h, w = image.shape[:2]
-        fh, fw = flow.shape[1], flow.shape[2]
         flow_resized = np.stack(
             [
                 cv2.resize(flow[0], (w, h), interpolation=cv2.INTER_LINEAR),
