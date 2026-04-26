@@ -247,22 +247,47 @@ class LineCropper:
         img_w: int,
     ) -> np.ndarray | None:
         """Polynomial unwarping for curved multi-point polygons."""
-        # 1. Identify top and bottom boundaries
+        # 1. Identify top and bottom boundaries.
+        #    For Kraken/CRAFT, the polygon is a closed boundary with an odd
+        #    number of points, so we cannot simply split in half: top and
+        #    bottom would have different cardinalities and downstream array
+        #    arithmetic would broadcast-error. Instead, sort by x and bucket
+        #    by y-median.
         n = len(poly)
-        top_pts = poly[:n//2]
-        bot_pts = poly[n//2:][::-1] # Reverse bottom to align with top horizontally
-        
+        if n < 4:
+            return None
+        if n % 2 == 0:
+            top_pts = poly[: n // 2]
+            bot_pts = poly[n // 2 :][::-1]
+        else:
+            # Closed boundary or off-by-one polygon — split along the y-median.
+            y_median = float(np.median(poly[:, 1]))
+            top_pts = poly[poly[:, 1] <= y_median]
+            bot_pts = poly[poly[:, 1] > y_median]
+            if len(top_pts) < 2 or len(bot_pts) < 2:
+                return None
+            # Sort by x so polynomial fitting is well-conditioned.
+            top_pts = top_pts[np.argsort(top_pts[:, 0])]
+            bot_pts = bot_pts[np.argsort(bot_pts[:, 0])]
+
         # 2. Fit polynomials to top and bottom
         t_x, t_y = top_pts[:, 0], top_pts[:, 1]
         b_x, b_y = bot_pts[:, 0], bot_pts[:, 1]
-        
+
         # Degree 2 is usually enough for paper curvature
         t_poly = np.polyfit(t_x, t_y, 2)
         b_poly = np.polyfit(b_x, b_y, 2)
-        
-        # 3. Define output rectangle grid
+
+        # 3. Define output rectangle grid. Use mean y-difference on a shared
+        # x-grid rather than ``b_y - t_y`` directly, which fails when top and
+        # bottom have different point counts.
         width = int(np.max(t_x) - np.min(t_x))
-        height = int(np.mean(b_y - t_y))
+        common_x = np.linspace(
+            max(np.min(t_x), np.min(b_x)),
+            min(np.max(t_x), np.max(b_x)),
+            max(width, 8),
+        )
+        height = int(np.mean(np.polyval(b_poly, common_x) - np.polyval(t_poly, common_x)))
         
         if height < self.min_height or width < self.min_width:
             return None

@@ -24,6 +24,7 @@ from typing import Optional
 from PIL import Image
 
 from ocr_pipeline.cropper.line_cropper import CropResult, LineCropper
+from ocr_pipeline.detector.base import LineDetector
 from ocr_pipeline.detector.paddle_detector import PaddleDetector
 from ocr_pipeline.file_handlers import load_bytes, load_file
 from ocr_pipeline.layout.reconstructor import LayoutReconstructor
@@ -50,7 +51,7 @@ class OCRPipeline:
 
     def __init__(
         self,
-        detector: PaddleDetector,
+        detector: LineDetector | PaddleDetector,
         cropper: LineCropper,
         recognizer: VietOCRRecognizer,
         reconstructor: LayoutReconstructor,
@@ -214,6 +215,7 @@ class OCRPipeline:
         # Detection runs on the rectified image; all downstream stages use
         # rectified-image coordinates.
         det_result = self.detector.detect_with_notebook_fallback(rectified_image)
+        det_diagnostics = dict(det_result.diagnostics or {})
         debug_page = DebugPageResult(
             page_number=page_number,
             raw_polygons=[
@@ -224,6 +226,9 @@ class OCRPipeline:
             rectifier_applied=rect_result.applied,
             rectifier_confidence=float(rect_result.confidence),
             rectifier_diagnostics=dict(rect_result.diagnostics),
+            detector_backend=det_diagnostics.get("backend"),
+            detector_diagnostics=det_diagnostics,
+            low_detector_recall=bool(det_diagnostics.get("low_detector_recall", False)),
         )
         if include_debug and self.save_rectifier_debug:
             debug_page.original_image_base64 = self._encode_preview(original_image)
@@ -339,6 +344,7 @@ class OCRPipeline:
     @classmethod
     def from_experiment_config(cls, config) -> "OCRPipeline":
         from ocr_pipeline.config import settings
+        from ocr_pipeline.detector import build_detector
 
         key = config.model_key or settings.get_default_model_key()
         model_cfg = settings.get_model_config(key)
@@ -356,8 +362,9 @@ class OCRPipeline:
                 getattr(config, "rectifier_max_quad_area_ratio", 0.95)
             ),
         )
-        return cls(
-            detector=PaddleDetector(
+        backend_name = (getattr(config, "detector_backend", "paddle") or "paddle").lower()
+        if backend_name in ("paddle", "paddleocr", "dbnet"):
+            detector = PaddleDetector(
                 use_gpu=settings.det_use_gpu,
                 db_thresh=settings.det_db_thresh,
                 db_box_thresh=settings.det_db_box_thresh,
@@ -368,7 +375,20 @@ class OCRPipeline:
                 box_type=settings.det_db_box_type,
                 detect_on_upscaled_image=config.detect_on_upscaled_image,
                 upscale_factor=config.upscale_factor,
-            ),
+                allow_grid_fallback=bool(
+                    getattr(config, "detector_allow_grid_fallback", False)
+                ),
+            )
+        else:
+            # Phase 3 detectors: Surya / CRAFT / Kraken BLLA. They share a
+            # tiny init surface; experiments override knobs via the
+            # ``detector_kwargs`` map on ``ExperimentConfig`` if needed.
+            detector = build_detector(
+                backend_name,
+                **dict(getattr(config, "detector_kwargs", {}) or {}),
+            )
+        return cls(
+            detector=detector,
             cropper=LineCropper(
                 min_height=settings.min_line_height,
                 min_width=settings.min_line_width,

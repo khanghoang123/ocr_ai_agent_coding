@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -118,7 +118,6 @@ def main() -> None:
     downloaded = 0
     for paper in papers:
         dl = paper.get("download") or {}
-        status = dl.get("status") or "pending"
         existing_path = (dl.get("pdf_path") or "").strip()
         if existing_path and not args.force and Path(existing_path).exists():
             dl["status"] = "downloaded"

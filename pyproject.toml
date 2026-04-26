@@ -26,3 +26,9 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+extend-exclude = [
+    # Vendored CRAFT code (clovaai/CRAFT-pytorch, MIT). Modifying it for
+    # style would diverge from upstream; we only patched the torchvision
+    # API for compatibility.
+    "src/ocr_pipeline/detector/_craft/**",
+]

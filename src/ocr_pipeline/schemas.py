@@ -201,6 +201,14 @@ class DebugPageResult(BaseModel):
     rectifier_diagnostics: Optional[dict] = None
     rectified_image_base64: Optional[str] = None
     original_image_base64: Optional[str] = None
+    # Phase 3: detector-backend diagnostics. ``low_detector_recall`` is the
+    # explicit flag that replaces the silent OpenCV grid fallback — when a
+    # detector cannot find any text, we say so loudly instead of fabricating
+    # full-image bands. ``detector_backend`` records which backend produced
+    # the polygons (paddle / surya / craft / kraken_blla / ...).
+    detector_backend: Optional[str] = None
+    detector_diagnostics: Optional[dict] = None
+    low_detector_recall: bool = False
 
 
 class OCRDebugItem(BaseModel):

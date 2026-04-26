@@ -364,3 +364,106 @@ def diagnostic_diff(before: dict, after: dict) -> dict[str, float | int | str]:
         diff["verdict"] = "no_change"
     diff["diagnostic_score_delta"] = score
     return diff
+
+
+# ── Detector-level metrics (Phase 3) ─────────────────────────────────────────
+#
+# These metrics measure detector quality directly, *without* needing
+# ground-truth boxes. They are the project's leaderboard signal for
+# comparing detector backends (Surya / CRAFT / Kraken / Paddle).
+#
+# All metrics expect a list of polygons. A polygon is any iterable that
+# can be coerced to an (N, 2) numpy array (lists of (x, y) tuples,
+# 4×2 quads, etc.).
+
+
+def _polygon_bbox(polygon) -> tuple[float, float, float, float]:
+    """Return the axis-aligned bbox (x1, y1, x2, y2) of a polygon."""
+    import numpy as _np
+
+    pts = _np.asarray(polygon, dtype=float).reshape(-1, 2)
+    return (
+        float(_np.min(pts[:, 0])),
+        float(_np.min(pts[:, 1])),
+        float(_np.max(pts[:, 0])),
+        float(_np.max(pts[:, 1])),
+    )
+
+
+def full_width_band_rate(polygons, image_width: int, ratio: float = 0.95) -> float:
+    """Fraction of polygons whose width covers >= ``ratio`` of the image width.
+
+    Detector-quality fingerprint: the silent OpenCV grid fallback used to
+    emit fixed-width horizontal bands across the page. Healthy detectors
+    score ~0.0; the fallback scores ~1.0.
+    """
+    if not polygons or image_width <= 0:
+        return 0.0
+    threshold = float(image_width) * float(ratio)
+    full_count = 0
+    for poly in polygons:
+        x1, _, x2, _ = _polygon_bbox(poly)
+        if (x2 - x1) >= threshold:
+            full_count += 1
+    return full_count / float(len(polygons))
+
+
+def mean_box_aspect_ratio(polygons) -> float:
+    """Mean of width/height across all polygons.
+
+    Healthy text lines are wide (aspect ~ 8–25). Single-character
+    detections are ~1; full-page bands explode upwards.
+    """
+    if not polygons:
+        return 0.0
+    ratios: list[float] = []
+    for poly in polygons:
+        x1, y1, x2, y2 = _polygon_bbox(poly)
+        height = max(y2 - y1, 1.0)
+        width = max(x2 - x1, 0.0)
+        ratios.append(width / height)
+    return float(sum(ratios) / len(ratios))
+
+
+def mean_distinct_x1_per_page(polygons, bin_size: int = 10) -> float:
+    """Number of distinct *left edges*, rounded to ``bin_size``-pixel bins.
+
+    Real handwritten pages have varied paragraph indents and word starts,
+    so distinct-x1 counts are typically 6+. Grid-fallback bands all start
+    at x=0, so this metric collapses to 1.
+
+    Returned as a float to match the rest of the metrics module — the
+    caller can int() it where needed.
+    """
+    if not polygons:
+        return 0.0
+    bin_size = max(int(bin_size), 1)
+    seen: set[int] = set()
+    for poly in polygons:
+        x1, _, _, _ = _polygon_bbox(poly)
+        seen.add(int(round(x1 / bin_size)) * bin_size)
+    return float(len(seen))
+
+
+def detector_metrics(polygons, image_width: int, image_height: int) -> dict:
+    """Bundle the three detector-quality metrics + raw count + median height.
+
+    This is the single function the experiment runner calls per page.
+    """
+    import numpy as _np
+
+    heights: list[float] = []
+    for poly in polygons:
+        _, y1, _, y2 = _polygon_bbox(poly)
+        heights.append(max(y2 - y1, 1.0))
+    median_height = float(_np.median(heights)) if heights else 0.0
+
+    return {
+        "detection_count": len(polygons),
+        "full_width_band_rate": full_width_band_rate(polygons, image_width),
+        "mean_box_aspect_ratio": mean_box_aspect_ratio(polygons),
+        "mean_distinct_x1_per_page": mean_distinct_x1_per_page(polygons),
+        "median_box_height": median_height,
+        "image_width": float(image_width),
+        "image_height": float(image_height),
+    }
