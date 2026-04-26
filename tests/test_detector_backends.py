@@ -99,6 +99,31 @@ def test_paddle_grid_fallback_can_be_opt_in():
     assert det.allow_grid_fallback is True
 
 
+def test_paddle_diagnose_detection_always_carries_backend_keys():
+    """The diagnostics dict must always include ``backend`` and
+    ``low_detector_recall`` regardless of which Paddle return path produces
+    it. This is the contract every downstream consumer relies on
+    (``DebugPageResult``, ``run_detector_experiment.py``)."""
+    det = PaddleDetector(use_gpu=False)
+
+    # Empty path.
+    diag_empty = det._diagnose_detection([], image_height=800)
+    assert diag_empty["backend"] == "paddle"
+    assert diag_empty["low_detector_recall"] is True
+
+    # Non-empty path.
+    polys = [
+        np.array([[10, 10], [200, 10], [200, 30], [10, 30]], dtype=float),
+        np.array([[10, 50], [180, 50], [180, 70], [10, 70]], dtype=float),
+    ]
+    diag_full = det._diagnose_detection(polys, image_height=800)
+    assert diag_full["backend"] == "paddle"
+    assert diag_full["low_detector_recall"] is False
+    assert "median_height" in diag_full
+    assert "estimated_rows" in diag_full
+    assert "coverage_ratio" in diag_full
+
+
 # ── CRAFT row clustering ─────────────────────────────────────────────────────
 
 

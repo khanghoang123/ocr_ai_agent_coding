@@ -1,0 +1,84 @@
+{
+  "fixtures": [
+    {
+      "id": "chi_pheo_page",
+      "image_path": "chi_pheo_page.jpg",
+      "expected_line_count": {
+        "min": 16,
+        "max": 34
+      },
+      "curved_lines": true,
+      "fallback_rate_max": 0.85,
+      "blank_margin_gain_min": 0.03,
+      "sentinel_prefixes": [
+        "Chí Phèo",
+        "Nam Cao sáng tác",
+        "Với tác phẩm Chí Phèo"
+      ]
+    },
+    {
+      "id": "chu_nguoi_tu_tu_page",
+      "image_path": "chu_nguoi_tu_tu_page.jpg",
+      "expected_line_count": {
+        "min": 14,
+        "max": 28
+      },
+      "curved_lines": true,
+      "fallback_rate_max": 0.85,
+      "blank_margin_gain_min": 0.03,
+      "sentinel_prefixes": [
+        "Chữ người tử tù",
+        "Nguyễn Tuân là",
+        "Nhân vật tài hoa"
+      ]
+    },
+    {
+      "id": "chiec_thuyen_ngoai_xa_page",
+      "image_path": "chiec_thuyen_ngoai_xa_page.jpg",
+      "expected_line_count": {
+        "min": 18,
+        "max": 34
+      },
+      "curved_lines": true,
+      "fallback_rate_max": 0.85,
+      "blank_margin_gain_min": 0.03,
+      "sentinel_prefixes": [
+        "Chiếc thuyền ngoài xa",
+        "Nguyễn Minh Châu",
+        "Được xem"
+      ]
+    },
+    {
+      "id": "lang_kim_lan_page_4",
+      "image_path": "lang_kim_lan_page_4.jpg",
+      "expected_line_count": {
+        "min": 18,
+        "max": 34
+      },
+      "curved_lines": false,
+      "fallback_rate_max": 0.8,
+      "blank_margin_gain_min": 0.03,
+      "sentinel_prefixes": [
+        "Tình yêu làng",
+        "Đến khi biết",
+        "Ông"
+      ]
+    },
+    {
+      "id": "essay_sample_page",
+      "image_path": "essay_sample_page.jpg",
+      "expected_line_count": {
+        "min": 12,
+        "max": 26
+      },
+      "curved_lines": false,
+      "fallback_rate_max": 0.8,
+      "blank_margin_gain_min": 0.03,
+      "sentinel_prefixes": [
+        "Hành trình sáng tác",
+        "Tây Tiến",
+        "Quang Dũng"
+      ]
+    }
+  ]
+}

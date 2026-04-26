@@ -176,9 +176,8 @@ class PaddleDetector:
             confidences.append(conf)
             sources.append("full_page")
 
+        # ``_diagnose_detection`` already stamps backend/low_detector_recall.
         diagnostics = self._diagnose_detection(polygons, image.height)
-        diagnostics["backend"] = "paddle"
-        diagnostics["low_detector_recall"] = False
         return DetectionResult(
             polygons=polygons,
             confidences=confidences,
@@ -646,8 +645,22 @@ class PaddleDetector:
         )
 
     def _diagnose_detection(self, polygons: list[np.ndarray], image_height: int) -> dict:
+        """Build the detector diagnostics block.
+
+        Phase 3 contract: every backend's diagnostics block MUST carry
+        ``backend`` and ``low_detector_recall`` so downstream consumers
+        (``DebugPageResult``, the experiment runner) can branch on them
+        uniformly. Including those keys here means every Paddle return path
+        — full-page, patchwise-merged, or zero — is consistent.
+        """
         if not polygons:
-            return {"median_height": 0.0, "estimated_rows": 0.0, "coverage_ratio": 0.0}
+            return {
+                "median_height": 0.0,
+                "estimated_rows": 0.0,
+                "coverage_ratio": 0.0,
+                "backend": "paddle",
+                "low_detector_recall": True,
+            }
 
         heights = []
         for poly in polygons:
@@ -661,6 +674,8 @@ class PaddleDetector:
             "median_height": median_height,
             "estimated_rows": estimated_rows,
             "coverage_ratio": coverage_ratio,
+            "backend": "paddle",
+            "low_detector_recall": False,
         }
 
     def _looks_undersegmented(self, result: DetectionResult, image_height: int) -> bool:

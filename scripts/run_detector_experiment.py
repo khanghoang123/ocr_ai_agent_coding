@@ -452,10 +452,31 @@ def main() -> int:
     spec_map = {s.exp_id: s for s in chosen_specs}
 
     aggregate_jsonl = args.output_dir / "per_image_metrics.jsonl"
-    # Only truncate when running the full default set; otherwise we'd lose
-    # results from previous backends when re-running a single experiment.
-    if aggregate_jsonl.exists() and not args.experiments:
-        aggregate_jsonl.unlink()
+    if aggregate_jsonl.exists():
+        if not args.experiments:
+            # Full run — wipe the leaderboard.
+            aggregate_jsonl.unlink()
+        else:
+            # Partial rerun — preserve rows from experiments NOT being rerun,
+            # but drop stale rows for the ones being rerun. Without this,
+            # ``aggregate()`` double-counts the rerun experiments and the
+            # summary is wrong.
+            rerun_ids = set(args.experiments)
+            kept_lines: list[str] = []
+            with aggregate_jsonl.open(encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        row = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if row.get("exp_id") not in rerun_ids:
+                        kept_lines.append(stripped)
+            with aggregate_jsonl.open("w", encoding="utf-8") as f:
+                for line in kept_lines:
+                    f.write(line + "\n")
 
     all_rows: list[dict] = []
     for spec in chosen_specs:
