@@ -1,0 +1,42 @@
+name: phase2C_rectified
+description: |
+  Phase 2C — adds page-level document rectification (dewarping) BEFORE
+  detection. Hybrid backend: DocTr++ when weights are available,
+  OpenCV 4-corner perspective correction as fallback. All other knobs are
+  inherited from the phase 2B crop-geometry config so this directly
+  isolates the contribution of page-level rectification.
+crop_padding_ratio: 0.08
+rectify_line: true
+enable_local_contrast: true
+detect_on_upscaled_image: true
+upscale_factor: 1.0
+enable_vietnamese_postprocess: false
+flag_digit_noise: false
+debug: true
+enable_noise_box_filter: true
+tiny_box_height_ratio: 0.45
+tiny_box_width_ratio: 0.08
+tiny_box_min_ink_occupancy: 0.01
+enable_rotated_crop: true
+debug_save_intermediate_crops: false
+crop_strategy: validated
+enable_line_deskew: true
+min_crop_height_ratio: 0.60
+vertical_padding_ratio: 0.18
+horizontal_padding_ratio: 0.25
+max_deskew_angle: 8.0
+# ── Page-level rectification (Phase 2C) ──────────────────────────────────────
+enable_document_perspective_correction: true
+rectifier_backend: hybrid
+# Optional: path to a DocTr++ TorchScript / ONNX export. If missing, falls
+# back to OpenCV automatically.
+rectifier_weights_path: models/rectifier/doctrpp.torchscript
+rectifier_device: cpu
+rectifier_min_quad_area_ratio: 0.25
+rectifier_max_quad_area_ratio: 0.95
+rectifier_min_confidence: 0.5
+# Paper must be ≥ this many luminance steps brighter than its background
+# (0–255 scale). Otherwise the "quad" is most likely the printed inner
+# rectangle of an already-flat scan, and rectifying would just crop margins.
+rectifier_min_paper_background_contrast: 18.0
+rectifier_save_debug: true

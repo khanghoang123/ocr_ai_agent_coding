@@ -67,6 +67,25 @@ VALID_NUMBER_RE = re.compile(
 )
 SUSPICIOUS_DIGIT_RE = re.compile(r"(?=\S*[A-Za-zÀ-ỹ])(?=\S*\d)\S+")
 
+# Characters that should never appear in normal Vietnamese handwritten text.
+# Vietnamese uses Latin letters with diacritics, digits, and standard punctuation.
+# Anything outside this set is treated as an abnormal symbol (likely VietOCR
+# decoding noise on a malformed crop). We deliberately exclude rare ASCII
+# symbols like # @ % ^ & * $ that are almost never present in handwritten
+# paragraphs and are a common hallucination signal.
+ABNORMAL_SYMBOL_RE = re.compile(r"[^A-Za-zÀ-ỹà-ỹ0-9\s\.,;:!\?\(\)\[\]\{\}'\"\-—–_/«»“”‘’]")
+
+# Tokens that look like ALL-CAPS Latin abbreviations (>= 2 letters), which are
+# the classic VietOCR hallucination pattern reported by the project (ND, TP,
+# UBND, etc.) when fed a poor crop. Excludes pure-digit tokens.
+UPPERCASE_TOKEN_RE = re.compile(r"\b[A-ZĐÁÀẢÃẠÂẤẦẨẪẬĂẮẰẲẴẶÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỠỢÚÙỦŨỤƯỨỪỬỮỰÝỲỶỸỴ]{2,}\b")
+
+# Repeated 0/1 sequences (≥4 chars), a textbook VietOCR hallucination on
+# blurry / over-cropped lines (e.g. "010101", "1111", "0000110").
+REPEATED_BINARY_RE = re.compile(r"(?:[01]){4,}")
+# More general: any digit run of length ≥5 that is not a year/date-like token
+LONG_DIGIT_RUN_RE = re.compile(r"\d{5,}")
+
 
 def suspicious_digit_tokens(text: str) -> list[str]:
     tokens: list[str] = []
@@ -144,3 +163,208 @@ class ImageMetric:
     normalized_line_count_error: float | None
     detection_count: int
     crop_flag_count: int
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hallucination diagnostic metrics.
+#
+# These are designed for the "no ground truth" evaluation regime described in
+# the task spec: we cannot compute CER/WER, but we *can* detect output text
+# that has the structural fingerprints of VietOCR hallucination — long digit
+# runs, all-caps Latin abbreviations, abnormal Unicode symbols, mixed
+# digit-letter garbage. They are pure functions of the predicted text.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def abnormal_symbol_count(text: str) -> int:
+    """Number of characters outside the normal Vietnamese character set."""
+    return len(ABNORMAL_SYMBOL_RE.findall(normalize_for_metric(text)))
+
+
+def abnormal_symbol_rate(text: str) -> float:
+    """Fraction of characters that are not part of normal Vietnamese text."""
+    normalized = normalize_for_metric(text)
+    if not normalized:
+        return 0.0
+    bad = abnormal_symbol_count(normalized)
+    visible = sum(1 for ch in normalized if not ch.isspace())
+    if visible == 0:
+        return 0.0
+    return bad / visible
+
+
+def uppercase_garbage_tokens(text: str) -> list[str]:
+    """All-caps Latin tokens of length ≥2 (e.g. ND, TP, UBND).
+
+    Vietnamese handwriting is overwhelmingly lowercase. When VietOCR is fed a
+    bad crop, it tends to fall back to short uppercase abbreviation tokens
+    that exist heavily in its training distribution — this is the classic
+    'ND/TP/UBND' hallucination reported in this project.
+    """
+    return UPPERCASE_TOKEN_RE.findall(normalize_for_metric(text))
+
+
+def uppercase_garbage_token_count(text: str) -> int:
+    return len(uppercase_garbage_tokens(text))
+
+
+def uppercase_garbage_token_rate(text: str) -> float:
+    """Fraction of whitespace-separated tokens that look like all-caps garbage."""
+    normalized = normalize_for_metric(text)
+    if not normalized:
+        return 0.0
+    tokens = normalized.split()
+    if not tokens:
+        return 0.0
+    return uppercase_garbage_token_count(normalized) / len(tokens)
+
+
+_DATE_LIKE_RE = re.compile(
+    r"^(?:"
+    r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?"   # 1/2 or 12/3 or 12/03/2024
+    r"|\d{1,3}(?:[.,]\d{1,3})+"             # 1.234 or 12,345.67
+    r"|19\d{2}|20\d{2}"                      # 4-digit year
+    r")$"
+)
+
+
+def repeated_number_sequences(text: str) -> list[str]:
+    """Repeated 0/1 sequences and long digit runs that are not date-like.
+
+    VietOCR's classic hallucination on noisy/curved crops is to emit long runs
+    of '0' and '1' (its decoder collapses to high-frequency tokens). We also
+    flag any digit run ≥5 chars that doesn't fit a plausible number/date.
+    """
+    normalized = normalize_for_metric(text)
+    matches: list[str] = []
+    matches.extend(REPEATED_BINARY_RE.findall(normalized))
+    for run in LONG_DIGIT_RUN_RE.findall(normalized):
+        if run in matches:
+            continue
+        if _DATE_LIKE_RE.match(run):
+            continue
+        matches.append(run)
+    return matches
+
+
+def repeated_number_sequence_count(text: str) -> int:
+    return len(repeated_number_sequences(text))
+
+
+def suspicious_digit_token_count(text: str) -> int:
+    return len(suspicious_digit_tokens(text))
+
+
+def is_garbage_line(text: str) -> bool:
+    """Heuristic for whether a single line of OCR output is garbage.
+
+    Mirrors `_is_garbage_text` in `validation.debug_analyzer` so we have one
+    canonical implementation usable from both sides of the pipeline.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    letters = sum(ch.isalpha() for ch in stripped)
+    digits = sum(ch.isdigit() for ch in stripped)
+    alnum = letters + digits
+    punctuation = sum((not ch.isalnum() and not ch.isspace()) for ch in stripped)
+    if alnum == 0:
+        return True
+    digit_ratio = digits / max(alnum, 1)
+    punctuation_ratio = punctuation / max(len(stripped), 1)
+    uppercase_tokens = [token for token in stripped.split() if len(token) >= 2 and token.isupper()]
+    uppercase_ratio = len(uppercase_tokens) / max(len(stripped.split()), 1)
+    return (
+        digit_ratio > 0.55
+        or punctuation_ratio > 0.35
+        or (uppercase_ratio > 0.65 and letters > 8)
+        or len(stripped) <= 2
+    )
+
+
+def garbage_text_ratio(lines: Iterable[str]) -> float:
+    """Fraction of lines flagged as garbage."""
+    line_list = [line for line in lines]
+    if not line_list:
+        return 0.0
+    return sum(1 for line in line_list if is_garbage_line(line)) / len(line_list)
+
+
+def is_hallucinated_line(text: str) -> bool:
+    """Detect VietOCR hallucination on a single line.
+
+    A line is flagged as hallucinated if it shows ANY of:
+    - all-caps Latin abbreviation tokens (ND/TP/UBND-style)
+    - long digit runs / repeated 0-1 sequences
+    - abnormal-symbol rate > 5%
+    - mixed digit-letter "suspicious" tokens
+    """
+    if not text:
+        return False
+    if uppercase_garbage_token_count(text) >= 1:
+        return True
+    if repeated_number_sequence_count(text) >= 1:
+        return True
+    if abnormal_symbol_rate(text) > 0.05:
+        return True
+    if suspicious_digit_token_count(text) >= 1:
+        return True
+    return False
+
+
+def diagnostic_metrics(lines: Iterable[str]) -> dict[str, float | int]:
+    """Aggregate diagnostic metrics over a list of OCR lines for a single image.
+
+    Returns a flat dict suitable for serialization to JSONL.
+    """
+    line_list = [line or "" for line in lines]
+    full_text = "\n".join(line_list)
+    line_count = len(line_list)
+    hallucinated = [line for line in line_list if is_hallucinated_line(line)]
+    return {
+        "line_count": line_count,
+        "char_count": len(full_text),
+        "digit_noise_rate": digit_noise_rate(full_text),
+        "garbage_text_ratio": garbage_text_ratio(line_list),
+        "high_digit_noise_line_rate": (
+            sum(1 for line in line_list if digit_noise_rate(line) >= 0.20) / max(line_count, 1)
+        ),
+        "abnormal_symbol_rate": abnormal_symbol_rate(full_text),
+        "abnormal_symbol_count": abnormal_symbol_count(full_text),
+        "suspicious_digit_token_count": suspicious_digit_token_count(full_text),
+        "uppercase_garbage_token_count": uppercase_garbage_token_count(full_text),
+        "uppercase_garbage_token_rate": uppercase_garbage_token_rate(full_text),
+        "repeated_number_sequence_count": repeated_number_sequence_count(full_text),
+        "hallucinated_line_count": len(hallucinated),
+        "hallucinated_line_rate": len(hallucinated) / max(line_count, 1),
+    }
+
+
+def diagnostic_diff(before: dict, after: dict) -> dict[str, float | int | str]:
+    """Compute before→after deltas for the diagnostic metrics dict.
+
+    Negative deltas on the `*_rate` / `*_count` keys are improvements.
+    Returns a verdict in {"improved", "worsened", "no_change"} based on
+    whether the *hallucinated_line_rate* moved by more than 1 percentage point.
+    """
+    keys = set(before.keys()) | set(after.keys())
+    diff: dict[str, float | int | str] = {}
+    for key in keys:
+        b = before.get(key, 0)
+        a = after.get(key, 0)
+        try:
+            diff[f"delta_{key}"] = float(a) - float(b)
+        except (TypeError, ValueError):
+            continue
+    halluc_delta = float(diff.get("delta_hallucinated_line_rate", 0.0))
+    garbage_delta = float(diff.get("delta_garbage_text_ratio", 0.0))
+    digit_delta = float(diff.get("delta_digit_noise_rate", 0.0))
+    score = halluc_delta + 0.5 * garbage_delta + 0.5 * digit_delta
+    if score < -0.01:
+        diff["verdict"] = "improved"
+    elif score > 0.01:
+        diff["verdict"] = "worsened"
+    else:
+        diff["verdict"] = "no_change"
+    diff["diagnostic_score_delta"] = score
+    return diff
