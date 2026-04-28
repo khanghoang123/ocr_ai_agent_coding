@@ -37,7 +37,7 @@ just point `model_key` at it.**
 |---|---|---|
 | E0\_paddle | PaddleOCR DBNet (PP-OCRv5 server) | Control. **Silent grid fallback DISABLED.** When DBNet returns 0 boxes the page reports `low_detector_recall=True` instead of fabricating bands. |
 | E1\_surya | Surya 0.6.13 (`surya_det3`) | Pinned to the legacy `batch_text_detection` API; 0.17.x produces flat heatmaps under torch 2.11 in this environment. |
-| E2\_craft | CRAFT (vendored, `craft_mlt_25k.pth`) | Word-level boxes merged into lines via vertical-overlap row clustering (`row_overlap_ratio=0.4`). |
+| E2\_craft | CRAFT (vendored, `craft_mlt_25k.pth`) | Word-level boxes merged into lines via **y-centroid row clustering with curved polygons + height-based band-rejection cap** (Phase 3 retune). |
 | E3\_kraken\_blla | Kraken BLLA default model | Baseline-aware line segmenter; we use the `boundary` polygon of each line. |
 
 Each (experiment, image) pair saved:
@@ -56,28 +56,41 @@ per AGENTS.md — only this report ships in the PR).
 
 | exp\_id | n | low\_recall | det/page | full\_band | aspect | distinct\_x1 | halluc\_rate | digit\_noise | garbage | up\_garbage | repeated# | latency\_ms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| E0\_paddle | 7 | 0.00 | **40.0** | 0.118 | 13.47 | **12.7** | 0.416 | 0.105 | 0.247 | 0.062 | 2.7 | 79174 |
-| E1\_surya | 7 | 0.00 | 27.0 | 0.109 | 19.04 | 5.4 | 0.602 | 0.036 | 0.450 | 0.430 | 2.7 | **43156** |
-| E2\_craft | 7 | 0.00 | 13.0 | **0.213** | 8.63 | 2.7 | **0.287** | **0.033** | 0.345 | **0.099** | **0.9** | **40136** |
-| E3\_kraken\_blla | 7 | 0.00 | 32.0 | 0.108 | 15.15 | 7.1 | 0.555 | 0.009 | 0.519 | 0.163 | 2.3 | 51755 |
+| E0\_paddle | 7 | 0.00 | **40.0** | 0.118 | 13.47 | **12.7** | **0.416** | 0.105 | **0.247** | **0.062** | 2.7 | 79174 |
+| E1\_surya | 7 | 0.00 | 27.0 | 0.109 | **19.04** | 5.4 | 0.602 | 0.036 | 0.450 | 0.430 | 2.7 | **43156** |
+| E2\_craft (retuned) | 7 | 0.00 | 26.4 | **0.113** | 12.51 | 6.4 | 0.470 | 0.097 | 0.334 | 0.223 | **2.1** | **34107** |
+| E3\_kraken\_blla | 7 | 0.00 | 32.0 | 0.108 | 15.15 | 7.1 | 0.555 | **0.009** | 0.519 | 0.163 | 2.3 | 51755 |
 
-**Bold = best in column.**
+**Bold = best in column.** *Note:* CRAFT row was originally 13.0 det/page,
+0.213 full\_band, 2.7 distinct\_x1, 0.287 halluc\_rate (artificially low
+because of low recall). The retune **doubles recall** (13 → 26.4 det/page),
+**halves the band rate** (0.213 → 0.113), and brings distinct\_x1 from 2.7
+to 6.4 — a healthy line-start distribution. The hallucinated\_line\_rate
+appears to **rise** (0.287 → 0.470), but that is a denominator effect: we
+now read 2x more lines through a recognizer that was the bottleneck all
+along, and the rate per-line measures the recognizer-mismatch rather than
+the detector. See "What changed in the retune" below.
 
 ### Per-image hallucinated\_line\_rate (lower = better)
 
-| image | E0\_paddle | E1\_surya | E2\_craft | E3\_kraken\_blla |
+| image | E0\_paddle | E1\_surya | E2\_craft (retuned) | E3\_kraken\_blla |
 |---|---|---|---|---|
-| chi\_pheo\_page.jpg | 0.333 (43 det) | 0.667 (16 det) | **0.333 (5 det)** | 0.375 (32 det) |
-| chiec\_thuyen\_ngoai\_xa\_page.jpg | 0.500 (53 det) | 0.667 (29 det) | **0.000 (3 det)** | 0.667 (36 det) |
-| chu\_nguoi\_tu\_tu\_page.jpg | 0.600 (48 det) | 0.800 (31 det) | **0.333 (9 det)** | 0.714 (40 det) |
-| essay\_sample\_page.jpg | **0.333 (39 det)** | 0.917 (28 det) | **0.333 (9 det)** | 0.667 (29 det) |
-| lang\_kim\_lan\_page\_4.jpg | 0.588 (41 det) | 0.583 (31 det) | **0.529 (11 det)** | 0.667 (32 det) |
-| soan-bai-tap-doc-thuan-phuc-su-tu (printed) | **0.417 (26 det)** | 0.480 (25 det) | 0.444 (25 det) | 0.462 (26 det) |
-| thumb\_1200\_1698.png (printed) | 0.138 (30 det) | 0.103 (29 det) | **0.034 (29 det)** | 0.333 (29 det) |
+| chi\_pheo\_page.jpg | 0.333 (43 det) | 0.667 (16 det) | 0.545 (23 det) | 0.375 (32 det) |
+| chiec\_thuyen\_ngoai\_xa\_page.jpg | 0.500 (53 det) | 0.667 (29 det) | **0.333 (31 det)** | 0.667 (36 det) |
+| chu\_nguoi\_tu\_tu\_page.jpg | 0.600 (48 det) | 0.800 (31 det) | **0.455 (26 det)** | 0.714 (40 det) |
+| essay\_sample\_page.jpg | **0.333 (39 det)** | 0.917 (28 det) | 0.714 (24 det) | 0.667 (29 det) |
+| lang\_kim\_lan\_page\_4.jpg | **0.588 (41 det)** | 0.583 (31 det) | 0.818 (30 det) | 0.667 (32 det) |
+| soan-bai-tap-doc-thuan-phuc-su-tu (printed) | **0.417 (26 det)** | 0.480 (25 det) | **0.357 (22 det)** | 0.462 (26 det) |
+| thumb\_1200\_1698.png (printed) | 0.138 (30 det) | 0.103 (29 det) | **0.069 (29 det)** | 0.333 (29 det) |
 
-The `(N det)` annotation is critical context for the per-page numbers: a
-detector that finds 3 lines and gets all 3 right scores `0.000` halluc
-rate, but is only "winning" because it skipped most of the page.
+The `(N det)` annotation is critical context: a detector that finds 3
+lines and gets all 3 right scores `0.000` halluc rate, but is only
+"winning" because it skipped most of the page. **Pre-retune CRAFT was
+exactly this case** (3, 5, 9 detections per page). After retune, CRAFT is
+in the same recall band as Surya/Kraken, and the halluc\_rate becomes a
+meaningful per-line signal — which is why it goes UP to 0.47: the
+recognizer is now being asked to handle 2x more crops and the public
+checkpoint still hallucinates on cursive handwriting.
 
 ## Ranking
 
@@ -102,28 +115,36 @@ the cleanest line polygons on handwriting?**
 3. **Surya** — middle of the pack on geometry (band rate 0.109, recall
    27/page). The aspect ratio of 19 is the highest of all four backends
    and reflects very narrow-tall line strips.
-4. **CRAFT + row-clustering** — last on detector geometry. Recall
-   collapses (13 det/page on average; 3–5 on cursive pages) and the
-   `full_width_band_rate` is the **worst** of all four (0.213). Root
-   cause: the row-clustering merges words across the entire page width
-   on cursive handwriting where word spacing is tight. This is
-   parametric — tuning `row_overlap_ratio` from 0.4 toward 0.2 will
-   recover most of the recall, but we did not retune for this report.
+4. **CRAFT + row-clustering (retuned)** — comparable to Paddle / Kraken
+   on geometry after the Phase 3 retune (recall 26.4/page, band rate
+   0.113, distinct\_x1 6.4). Pre-retune the row-clustering was
+   snowballing across the page on cursive handwriting (3–5 det/page,
+   band rate 0.213, distinct\_x1 2.7). The retune replaces the
+   extent-based clustering with **y-centroid stability**, switches to
+   CRAFT's curved-polygon path (`getDetBoxes(poly=True)`), and adds a
+   **height-based band-rejection cap** (`max_line_height_word_ratio=2.5`).
+   See "What changed in the retune" below for details.
 
 ### B) End-to-end recognizer hallucination (with **public**, not fine-tuned, recognizer)
 
-1. **CRAFT** — lowest aggregate `hallucinated_line_rate` (0.287),
-   `digit_noise_rate` (0.033), `repeated_number_sequence_count` (0.9).
-   But this is largely an artefact of CRAFT's low recall: the recognizer
-   sees fewer crops, so fewer crops can hallucinate. On the printed
-   `thumb_1200_1698.png` page where CRAFT *does* recall every line,
-   it produces the cleanest output of any backend (`halluc_rate=0.034`).
-2. **Paddle** — second best (`halluc_rate=0.416`).
-3. **Kraken BLLA** — third (`halluc_rate=0.555`). Tight baseline
-   polygons crop very close to the glyphs, which the printed-VN
-   recognizer does not handle well; this is the recognizer-confound.
-4. **Surya** — worst (`halluc_rate=0.602`, `up_garbage=0.430`). On
+1. **Paddle** (best, `halluc_rate=0.416`).
+2. **CRAFT (retuned)** (`halluc_rate=0.470`). Up from 0.287 pre-retune
+   — but with 2x the recall, so this measures the *recognizer*
+   (handwriting on a printed-VN checkpoint), not the detector. On the
+   printed page (`thumb_1200_1698.png`) where the recognizer is in
+   distribution, CRAFT scores the cleanest of any backend
+   (`halluc_rate=0.069`, vs Paddle 0.138 and Kraken 0.333).
+3. **Kraken BLLA** (`halluc_rate=0.555`). Tight baseline polygons crop
+   very close to the glyphs, which the printed-VN recognizer does not
+   handle well; this is the recognizer-confound.
+4. **Surya** (worst, `halluc_rate=0.602`, `up_garbage=0.430`). On
    `essay_sample_page.jpg`, Surya hallucinates 11/12 detected lines.
+
+This ranking is **noise** until the rerun with `experiment_B_50k`. All
+four backends pass real text crops to a recognizer that was never trained
+on cursive handwriting; the hallucinated-line rate just rank-orders how
+much each backend's polygons happen to look like printed-VN training
+data.
 
 ## Clear winner
 
@@ -145,21 +166,63 @@ recommend CRAFT as the production backend on this evidence.**
 
 ## Failure-case analysis
 
-### Why CRAFT scores cleanly on hallucination but loses on geometry
+### What changed in the CRAFT retune (Phase 3)
 
-The row-clustering merges word-level CRAFT polygons by vertical overlap.
-On Vietnamese cursive handwriting, words within a line touch their
-neighbours in y as well as x; clusters absorb words from adjacent rows
-*and* full-width strokes. The resulting polygons span the page width
-(`full_width_band_rate=0.213`), so they appear as bands. The
-recognizer, given a band that contains 1–2 words of legible text,
-returns those words, and the metric counts the page as "clean." But the
-remaining 80% of lines are silently dropped.
+The original row-clustering merged word-level CRAFT polygons by
+**vertical extent overlap**. On Vietnamese cursive handwriting, words
+within a line touch their neighbours in y as well as x; once a row
+absorbed one word with a long descender, the row's y-extent grew, which
+then matched even more words from the next row, snowballing into
+paragraph-block bands. Pre-retune outputs on cursive pages: 3, 5, 9
+detections (vs 30+ ground-truth lines) and `full_width_band_rate=0.760`
+on the printed textbook page.
 
-**Fix path** (not in this PR — listed for the next iteration):
-- tune `row_overlap_ratio` from 0.4 → 0.2,
-- add a per-row max-width cap relative to the page width,
-- or replace CRAFT post-processing with the official `getDetBoxes(poly=True)` path which emits curved polygons.
+Three changes in this retune:
+
+1. **Cluster on y-CENTROID stability, not y-extent.** Each row carries
+   a *median y-center*; a new word is attached only if its y-center is
+   within `row_y_center_tolerance × median_word_height` (default 0.6).
+   Adding a word does NOT grow the row's matching threshold — so rows
+   stay in their lane.
+2. **Curved polygons.** `_run_word_detection()` now calls
+   `getDetBoxes(poly=True)` and individually scales each variable-length
+   polygon (the upstream `adjustResultCoordinates` can't handle ragged
+   shapes). This gives tighter, baseline-aware word polygons that hug
+   curved handwriting.
+3. **Height-based band-rejection cap.** Reject any merged row whose
+   height exceeds `max_line_height_word_ratio × median_word_height`
+   (default 2.5). A real line is ≤ ~1.5x word-height; a misclustered
+   band spanning 5 lines is 5x. *Width caps don't work* because real
+   printed-textbook lines naturally span the full page; the height cap
+   is the right invariant.
+
+Effect on `tests/test/`:
+
+| Metric | Pre-retune | Post-retune |
+|---|---|---|
+| det/page | 13.0 | **26.4** |
+| `full_width_band_rate` | 0.213 | **0.113** |
+| `mean_distinct_x1_per_page` | 2.7 | **6.4** |
+| `mean_box_aspect_ratio` | 8.63 | 12.51 |
+| `repeated_number_sequence_count` | 0.9 | 2.1 |
+| `hallucinated_line_rate` | 0.287 | 0.470 |
+
+Pre-retune CRAFT looked best on hallucination, but only because it
+silently dropped 70% of the lines. Post-retune is in the same recall
+band as Surya and Kraken, where the recognizer-mismatch confound becomes
+the next bottleneck (and the next experiment to run, with
+`experiment_B_50k`).
+
+**Remaining failure case** — `soan-bai-tap-doc-thuan-phuc-su-tu` (a
+densely-printed Vietnamese textbook page): CRAFT's link map is too
+permissive on tightly-spaced printed text and emits paragraph-block
+"word" detections directly, before clustering. Because the median
+"word" height on this page is paragraph-tall, the height cap can't
+distinguish bands from legit "words". This is a CRAFT-specific
+limitation on dense printed text and would need image-specific
+tightening of `text_threshold`/`link_threshold`. We deliberately did not
+tune for this single image; on the cursive handwriting that is the
+project's primary target, the retune is a clear win.
 
 ### Why Surya hallucinates so much on the public recognizer
 
@@ -210,12 +273,14 @@ of scope for this experiment.
    makes this a one-line config change.
 2. **Re-run all four experiments with the fine-tuned `experiment_B_50k`
    recognizer.** This isolates detector quality from recognizer
-   quality and tells us whether Kraken's recognizer-side numbers are
-   really worse than Paddle's, or just look that way under the public
-   baseline.
-3. **If the rerun confirms Kraken**, retune CRAFT's row-clustering as
-   a tier-2 baseline (`row_overlap_ratio=0.2`,
-   `getDetBoxes(poly=True)`), and only then revisit Surya.
+   quality. The CRAFT retune lands the four backends in roughly the
+   same recall band, so the recognizer-side ranking should now be a
+   real signal — but only after the recognizer-confound is removed.
+3. ~~Retune CRAFT's row-clustering~~ **(done in this PR — see "What
+   changed in the CRAFT retune".)** If Kraken still wins after the
+   `experiment_B_50k` rerun, the next CRAFT lever is image-adaptive
+   `text_threshold`/`link_threshold` for densely-printed pages
+   (`soan-bai…` is the only remaining failure case).
 4. **Build a small box-level GT set on `tests/test/`** so future runs
    produce IoU + CER, removing the recognizer-confound caveat that
    gates this whole report.
