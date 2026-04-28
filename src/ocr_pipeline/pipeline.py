@@ -329,11 +329,34 @@ class OCRPipeline:
 
     @classmethod
     def from_settings(cls, model_key: Optional[str] = None) -> "OCRPipeline":
+        """Build an ``OCRPipeline`` from environment-driven Settings.
+
+        The detector backend is selected by ``Settings.detector_backend``
+        (env var ``DETECTOR_BACKEND``). Phase 3 default is ``kraken``;
+        when that fails to initialise (e.g. weights cannot be downloaded
+        in a sealed CI environment) we fall back to PaddleDetector so the
+        legacy code path keeps working.
+        """
         from ocr_pipeline.config import settings
+        from ocr_pipeline.detector import build_detector
 
         key = model_key or settings.get_default_model_key()
+        backend_name = (settings.detector_backend or "paddle").lower()
+        if backend_name in ("paddle", "paddleocr", "dbnet"):
+            detector = PaddleDetector.from_settings()
+        else:
+            try:
+                detector = build_detector(backend_name)
+            except Exception as exc:  # pragma: no cover - graceful fallback
+                logger.warning(
+                    "Configured detector backend %r failed to initialise (%s); "
+                    "falling back to PaddleDetector.",
+                    backend_name,
+                    exc,
+                )
+                detector = PaddleDetector.from_settings()
         return cls(
-            detector=PaddleDetector.from_settings(),
+            detector=detector,
             cropper=LineCropper.from_settings(),
             recognizer=VietOCRRecognizer.from_settings(key),
             reconstructor=LayoutReconstructor.from_settings(),
@@ -362,7 +385,14 @@ class OCRPipeline:
                 getattr(config, "rectifier_max_quad_area_ratio", 0.95)
             ),
         )
-        backend_name = (getattr(config, "detector_backend", "paddle") or "paddle").lower()
+        # Phase 3 default: Kraken BLLA (winner of the Tier-1 leaderboard).
+        # ``ExperimentConfig`` already defaults to ``"kraken"``; this
+        # ``or settings.detector_backend`` fallback only matters when the
+        # caller hands us a config object that doesn't define the field.
+        default_backend = settings.detector_backend or "kraken"
+        backend_name = (
+            getattr(config, "detector_backend", default_backend) or default_backend
+        ).lower()
         if backend_name in ("paddle", "paddleocr", "dbnet"):
             detector = PaddleDetector(
                 use_gpu=settings.det_use_gpu,

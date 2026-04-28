@@ -53,12 +53,15 @@ class ExperimentConfig:
     # cropping off its margins.
     rectifier_min_paper_background_contrast: float = 18.0
     rectifier_save_debug: bool = True
-    # Phase 3: detector backend selection. ``detector_backend`` picks one
-    # of {paddle, surya, craft, kraken_blla}. The silent OpenCV grid fallback
-    # in PaddleDetector is OFF by default; pass
+    # Phase 3 default: Kraken BLLA — winner of the Tier-1 leaderboard on
+    # tests/test/ (best full_width_band_rate, best recall on cursive
+    # handwriting, baseline-aware polygons that match the cropper's
+    # input shape). ``detector_backend`` picks one of
+    # {paddle, surya, craft, kraken}. The silent OpenCV grid fallback in
+    # PaddleDetector is OFF by default; pass
     # ``detector_allow_grid_fallback=True`` only for the legacy comparison
     # control. Backend-specific knobs go in ``detector_kwargs``.
-    detector_backend: str = "paddle"
+    detector_backend: str = "kraken"
     detector_allow_grid_fallback: bool = False
     detector_kwargs: dict[str, Any] = field(default_factory=dict)
     unsupported_options: list[str] = field(default_factory=list)

@@ -67,6 +67,19 @@ def test_build_detector_unknown_raises():
         build_detector("nonexistent")
 
 
+def test_default_detector_backend_is_kraken():
+    """Phase 3 winner. ``ExperimentConfig`` and ``Settings`` both default
+    to Kraken BLLA; flipping this default is a deliberate, leaderboard-
+    driven decision (see docs/phase3_detector_comparison_results.md) and
+    should not regress without a deliberate code change.
+    """
+    from ocr_pipeline.config import settings
+    from ocr_pipeline.experiment_config import ExperimentConfig
+
+    assert ExperimentConfig().detector_backend == "kraken"
+    assert settings.detector_backend.lower() == "kraken"
+
+
 # ── Empty detection contract ────────────────────────────────────────────────
 
 
