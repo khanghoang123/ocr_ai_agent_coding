@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     det_db_score_mode: str = "slow" # 'slow' is better for precise polygons on curved lines
     det_db_box_type: str = "poly"  # 'poly' allows multi-point polygons for curved lines
 
+    # Phase 3 default detector backend. Kraken BLLA was the winner of the
+    # Tier-1 leaderboard on tests/test/ (best full_width_band_rate, best
+    # recall on cursive handwriting). Override via DETECTOR_BACKEND env var
+    # — accepted values are paddle / surya / craft / kraken. The legacy
+    # silent OpenCV grid fallback is OFF regardless of backend.
+    detector_backend: str = "kraken"
+
     # ── VietOCR recognizer settings ──────────────────────────
     rec_architecture: str = "vgg_seq2seq"
     rec_image_height: int = 32
