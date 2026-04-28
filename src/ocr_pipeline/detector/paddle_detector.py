@@ -54,6 +54,7 @@ class PaddleDetector:
         box_type: str = "poly",
         detect_on_upscaled_image: bool = True,
         upscale_factor: float = 1.0,
+        allow_grid_fallback: bool = False,
         **kwargs,
     ):
         self.use_gpu = use_gpu
@@ -66,6 +67,13 @@ class PaddleDetector:
         self.box_type = box_type
         self.detect_on_upscaled_image = detect_on_upscaled_image
         self.upscale_factor = float(upscale_factor)
+        # Phase 3 (2026-04): the silent OpenCV `_estimated_line_grid` fallback
+        # was the root cause of the "20 full-width bands per page" failure
+        # mode on handwriting. It is now OPT-IN. With
+        # ``allow_grid_fallback=False`` (the new default), every code path
+        # that previously fabricated bands instead returns ``[]``, and the
+        # pipeline marks the page with ``low_detector_recall=True``.
+        self.allow_grid_fallback = bool(allow_grid_fallback)
         self._ocr = None  # Lazy init — heavy import
         self._paddle_runtime_failed = False
 
@@ -146,7 +154,16 @@ class PaddleDetector:
         processed, scale = self._preprocess_image(original)
         detections = self._run_detection(processed)
         if not detections:
-            return DetectionResult()
+            return DetectionResult(
+                diagnostics={
+                    "backend": "paddle",
+                    "low_detector_recall": True,
+                    "reason": "paddle_returned_no_boxes",
+                    "median_height": 0.0,
+                    "estimated_rows": 0.0,
+                    "coverage_ratio": 0.0,
+                }
+            )
             
         polygons: list[np.ndarray] = []
         confidences: list[float] = []
@@ -159,6 +176,7 @@ class PaddleDetector:
             confidences.append(conf)
             sources.append("full_page")
 
+        # ``_diagnose_detection`` already stamps backend/low_detector_recall.
         diagnostics = self._diagnose_detection(polygons, image.height)
         return DetectionResult(
             polygons=polygons,
@@ -278,7 +296,7 @@ class PaddleDetector:
     ) -> list[tuple[np.ndarray, float]]:
         """Run PaddleOCR and return normalized (polygon, confidence) items."""
         if self._paddle_runtime_failed:
-            return self._opencv_line_fallback(
+            return self._maybe_grid_fallback(
                 img_np,
                 allow_estimated_fallback=allow_estimated_fallback,
             )
@@ -294,6 +312,7 @@ class PaddleDetector:
                     allow_estimated_fallback=allow_estimated_fallback,
                     api_name="PaddleOCR predict",
                 )
+
 
         if hasattr(self._ocr, "ocr"):
             try:
@@ -318,8 +337,8 @@ class PaddleDetector:
                     api_name="PaddleOCR legacy ocr",
                 )
 
-        logger.warning("PaddleOCR object has neither predict() nor ocr(); using fallback detector.")
-        return self._opencv_line_fallback(
+        logger.warning("PaddleOCR object has neither predict() nor ocr(); returning no detections.")
+        return self._maybe_grid_fallback(
             img_np,
             allow_estimated_fallback=allow_estimated_fallback,
         )
@@ -340,15 +359,31 @@ class PaddleDetector:
         if self._is_paddle_runtime_attribute_error(exc):
             self._paddle_runtime_failed = True
             logger.warning(
-                "PaddleOCR runtime is incompatible in this environment; "
-                "using OpenCV line-detection fallback: %s",
-                exc,
+                "PaddleOCR runtime is incompatible in this environment: %s", exc
             )
-            return self._opencv_line_fallback(
+            return self._maybe_grid_fallback(
                 img_np,
                 allow_estimated_fallback=allow_estimated_fallback,
             )
         logger.warning("%s detection failed: %s", api_name, exc)
+        return self._maybe_grid_fallback(
+            img_np,
+            allow_estimated_fallback=allow_estimated_fallback,
+        )
+
+    def _maybe_grid_fallback(
+        self,
+        img_np: np.ndarray,
+        allow_estimated_fallback: bool,
+    ) -> list[tuple[np.ndarray, float]]:
+        """Phase 3: only run the OpenCV grid fallback when explicitly opted in.
+
+        Default is OFF — a detector that cannot detect must say so loudly
+        rather than fabricate full-width bands. The pipeline turns the
+        empty result into ``low_detector_recall=True``.
+        """
+        if not self.allow_grid_fallback:
+            return []
         return self._opencv_line_fallback(
             img_np,
             allow_estimated_fallback=allow_estimated_fallback,
@@ -610,8 +645,22 @@ class PaddleDetector:
         )
 
     def _diagnose_detection(self, polygons: list[np.ndarray], image_height: int) -> dict:
+        """Build the detector diagnostics block.
+
+        Phase 3 contract: every backend's diagnostics block MUST carry
+        ``backend`` and ``low_detector_recall`` so downstream consumers
+        (``DebugPageResult``, the experiment runner) can branch on them
+        uniformly. Including those keys here means every Paddle return path
+        — full-page, patchwise-merged, or zero — is consistent.
+        """
         if not polygons:
-            return {"median_height": 0.0, "estimated_rows": 0.0, "coverage_ratio": 0.0}
+            return {
+                "median_height": 0.0,
+                "estimated_rows": 0.0,
+                "coverage_ratio": 0.0,
+                "backend": "paddle",
+                "low_detector_recall": True,
+            }
 
         heights = []
         for poly in polygons:
@@ -625,6 +674,8 @@ class PaddleDetector:
             "median_height": median_height,
             "estimated_rows": estimated_rows,
             "coverage_ratio": coverage_ratio,
+            "backend": "paddle",
+            "low_detector_recall": False,
         }
 
     def _looks_undersegmented(self, result: DetectionResult, image_height: int) -> bool:

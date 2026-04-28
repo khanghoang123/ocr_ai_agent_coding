@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ocr_pipeline.detector.paddle_detector import PaddleDetector
+from ocr_pipeline.detector.paddle_detector import PaddleDetector  # noqa: E402
 
 
 @dataclass
