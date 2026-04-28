@@ -60,9 +60,34 @@ class CraftDetector:
         text_threshold: float = 0.7,
         link_threshold: float = 0.4,
         low_text: float = 0.4,
-        row_overlap_ratio: float = 0.4,
+        # Row-clustering knobs. After Phase 3 retune, the algorithm clusters
+        # by y-CENTROID rather than y-extent, so the threshold here is the
+        # max distance between a word's y-center and a row's median y-center,
+        # expressed as a fraction of the median word height. 0.6 means "a
+        # word can be at most 60% of a typical word-height away from the row
+        # mid-line". Larger → more permissive merging → wider bands.
+        row_y_center_tolerance: float = 0.6,
         x_pad_ratio: float = 0.02,
         y_pad_ratio: float = 0.10,
+        # Reject any merged "line" whose width exceeds this fraction of the
+        # page width — those are almost always misclustered paragraphs.
+        # Set to >=1.0 to disable; printed textbook lines naturally span
+        # close to the full page so we keep this loose by default and rely
+        # on the height-based cap below to drop genuine band hallucinations.
+        max_line_width_ratio: float = 1.0,
+        # Reject a merged row whose height exceeds this multiple of the
+        # global median word height. A real line is ≤ ~1.5x word-height
+        # (descenders + ascenders); a misclustered band spans many lines
+        # and ends up 3–10x. Default 2.5 catches bands without dropping
+        # legit lines.
+        max_line_height_word_ratio: float = 2.5,
+        # Use CRAFT's curved-polygon path (getDetBoxes(poly=True)) for tighter
+        # polygons that hug the actual text contour. Falls back to quads if
+        # the poly path fails.
+        use_curved_polygons: bool = True,
+        # Back-compat alias for the old extent-based parameter; if the caller
+        # still passes ``row_overlap_ratio`` we silently re-route it.
+        row_overlap_ratio: float | None = None,
         **_: Any,
     ):
         self.weights_path = Path(weights_path) if weights_path else DEFAULT_WEIGHTS
@@ -72,10 +97,18 @@ class CraftDetector:
         self.text_threshold = float(text_threshold)
         self.link_threshold = float(link_threshold)
         self.low_text = float(low_text)
-        # Row-clustering knobs (chosen on tests/test/ during Phase 3 dev).
-        self.row_overlap_ratio = float(row_overlap_ratio)
+        # Row-clustering knobs (Phase 3 retune — see cluster_words_into_lines).
+        # Back-compat: old configs pass ``row_overlap_ratio`` (extent-based);
+        # if so, treat it as a y-center tolerance directly.
+        if row_overlap_ratio is not None:
+            self.row_y_center_tolerance = float(row_overlap_ratio)
+        else:
+            self.row_y_center_tolerance = float(row_y_center_tolerance)
         self.x_pad_ratio = float(x_pad_ratio)
         self.y_pad_ratio = float(y_pad_ratio)
+        self.max_line_width_ratio = float(max_line_width_ratio)
+        self.max_line_height_word_ratio = float(max_line_height_word_ratio)
+        self.use_curved_polygons = bool(use_curved_polygons)
         self._net: torch.nn.Module | None = None
 
     def _ensure_loaded(self) -> None:
@@ -131,11 +164,13 @@ class CraftDetector:
 
         line_polys = cluster_words_into_lines(
             word_polys,
-            row_overlap_ratio=self.row_overlap_ratio,
+            row_y_center_tolerance=self.row_y_center_tolerance,
             x_pad_ratio=self.x_pad_ratio,
             y_pad_ratio=self.y_pad_ratio,
             image_width=image.width,
             image_height=image.height,
+            max_line_width_ratio=self.max_line_width_ratio,
+            max_line_height_word_ratio=self.max_line_height_word_ratio,
         )
 
         if not line_polys:  # pragma: no cover - defensive
@@ -187,21 +222,44 @@ class CraftDetector:
         score_text = y[0, :, :, 0].cpu().numpy()
         score_link = y[0, :, :, 1].cpu().numpy()
 
-        boxes, _ = craft_utils.getDetBoxes(
+        boxes, polys = craft_utils.getDetBoxes(
             score_text,
             score_link,
             self.text_threshold,
             self.link_threshold,
             self.low_text,
-            poly=False,
+            poly=self.use_curved_polygons,
         )
         boxes = craft_utils.adjustResultCoordinates(boxes, ratio_w, ratio_h)
+
+        # ``adjustResultCoordinates`` tries to stack the list into a single
+        # ndarray which fails for variable-length curved polygons; scale each
+        # poly individually instead. ``ratio_net`` is fixed at 2 in the
+        # original CRAFT post-processing.
+        ratio_net = 2
+        scaled_polys: list[np.ndarray | None] = []
+        if polys is not None:
+            for poly in polys:
+                if poly is None:
+                    scaled_polys.append(None)
+                else:
+                    arr = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+                    arr[:, 0] *= ratio_w * ratio_net
+                    arr[:, 1] *= ratio_h * ratio_net
+                    scaled_polys.append(arr)
+        else:
+            scaled_polys = [None] * len(boxes)
+
+        # Prefer the curved poly when CRAFT gave us one for that word; fall
+        # back to the axis-aligned quad otherwise. The clustering downstream
+        # uses bbox so the shape only matters for the FINAL line polygon.
         word_polys: list[np.ndarray] = []
-        for box in boxes:
-            poly = np.asarray(box, dtype=np.float32).reshape(-1, 2)
-            if poly.shape[0] != 4:
+        for box, poly in zip(boxes, scaled_polys):
+            chosen = poly if poly is not None else box
+            arr = np.asarray(chosen, dtype=np.float32).reshape(-1, 2)
+            if arr.shape[0] < 4:
                 continue
-            word_polys.append(poly)
+            word_polys.append(arr)
         return word_polys
 
 
@@ -210,27 +268,41 @@ class CraftDetector:
 
 def cluster_words_into_lines(
     word_polys: list[np.ndarray],
-    row_overlap_ratio: float = 0.4,
+    row_y_center_tolerance: float = 0.6,
     x_pad_ratio: float = 0.02,
     y_pad_ratio: float = 0.10,
     image_width: int = 0,
     image_height: int = 0,
+    max_line_width_ratio: float = 1.0,
+    max_line_height_word_ratio: float = 2.5,
+    # Back-compat: callers using the old extent-based threshold get re-routed.
+    row_overlap_ratio: float | None = None,
 ) -> list[tuple[np.ndarray, float]]:
     """Group word-level polygons into line-level polygons.
 
-    Algorithm:
-      1. Compute axis-aligned bbox per word.
-      2. Sort by y-center.
-      3. Greedily assign each word to an existing row whose vertical extent
-         overlaps the word by at least ``row_overlap_ratio`` of the word
-         height; otherwise start a new row.
-      4. For each row, take the union bbox (x_min .. x_max, y_min .. y_max)
-         and pad slightly to give VietOCR's cropper some breathing room.
+    *Phase 3 retune.* The previous version clustered on **vertical extent**
+    overlap, which snowballs catastrophically on cursive handwriting:
+    every absorbed word grows the row's y-extent, which then catches more
+    words from neighbouring rows. The result was paragraph-sized bands
+    spanning many lines (see ``soan-bai…`` overlay, fwb=0.760).
 
-    Returns a list of ``(quad, confidence)`` where ``quad`` is the 4-point
-    polygon and ``confidence`` is the mean word area (unitless proxy —
-    CRAFT does not emit per-word confidence in this code path).
+    The new algorithm clusters on **y-CENTROID stability** instead:
+      1. Bbox each word.
+      2. Compute global median word height H as a robust scale.
+      3. Sort words by y-center.
+      4. For each word, attach to a row whose median y-center is within
+         ``row_y_center_tolerance × H``; else start a new row.
+      5. Reject any row whose final width exceeds
+         ``max_line_width_ratio × image_width`` — those are almost always
+         misclustered paragraphs of cursive text.
+
+    Returns a list of ``(quad, confidence)``.
     """
+    if row_overlap_ratio is not None:
+        # Old kw-arg — caller is still on the extent-based API. Re-interpret
+        # it as the new center-tolerance value rather than silently dropping.
+        row_y_center_tolerance = row_overlap_ratio
+
     if not word_polys:
         return []
 
@@ -248,30 +320,54 @@ def cluster_words_into_lines(
     if not word_bboxes:
         return []
 
+    heights = [b[3] - b[1] for b in word_bboxes]
+    median_h = float(np.median(heights)) if heights else 1.0
+    tolerance = max(2.0, median_h * row_y_center_tolerance)
+
     word_bboxes.sort(key=lambda b: (b[1] + b[3]) * 0.5)
 
-    rows: list[list[tuple[float, float, float, float]]] = []
+    # rows is a list of dicts: ``members`` (bboxes) + ``y_center`` (median).
+    rows: list[dict[str, Any]] = []
     for bbox in word_bboxes:
-        _, y1, _, y2 = bbox
-        bh = max(y2 - y1, 1.0)
+        yc = (bbox[1] + bbox[3]) * 0.5
         placed = False
+        # Search nearest-row first — stable when rows are sorted by y_center.
+        best_row = None
+        best_dist = float("inf")
         for row in rows:
-            ry1 = min(b[1] for b in row)
-            ry2 = max(b[3] for b in row)
-            inter = max(0.0, min(ry2, y2) - max(ry1, y1))
-            if inter / bh >= row_overlap_ratio:
-                row.append(bbox)
-                placed = True
-                break
+            d = abs(yc - row["y_center"])
+            if d < best_dist:
+                best_dist = d
+                best_row = row
+        if best_row is not None and best_dist <= tolerance:
+            best_row["members"].append(bbox)
+            ys = [(b[1] + b[3]) * 0.5 for b in best_row["members"]]
+            best_row["y_center"] = float(np.median(ys))
+            placed = True
         if not placed:
-            rows.append([bbox])
+            rows.append({"members": [bbox], "y_center": yc})
 
     line_polys: list[tuple[np.ndarray, float]] = []
+    width_cap = (
+        float(image_width) * max_line_width_ratio if image_width else float("inf")
+    )
+    height_cap = max(
+        median_h * max_line_height_word_ratio,
+        median_h + 4.0,
+    )
     for row in rows:
-        x1 = min(b[0] for b in row)
-        y1 = min(b[1] for b in row)
-        x2 = max(b[2] for b in row)
-        y2 = max(b[3] for b in row)
+        members = row["members"]
+        x1 = min(b[0] for b in members)
+        y1 = min(b[1] for b in members)
+        x2 = max(b[2] for b in members)
+        y2 = max(b[3] for b in members)
+        # Drop runaway clusters: very wide AND/OR very tall relative to a
+        # typical word. The height cap is the primary defence on printed
+        # text where lines naturally span the full page width.
+        if (x2 - x1) > width_cap:
+            continue
+        if (y2 - y1) > height_cap:
+            continue
         h = y2 - y1
         x_pad = max(2.0, h * x_pad_ratio)
         y_pad = max(1.0, h * y_pad_ratio)
@@ -289,10 +385,7 @@ def cluster_words_into_lines(
             [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
             dtype=np.float32,
         )
-        # Confidence proxy: number of merged words (normalised). CRAFT's
-        # post-processing strips per-word scores, so this is the cheapest
-        # honest signal.
-        line_polys.append((quad, float(min(1.0, len(row) / 8.0 + 0.2))))
+        line_polys.append((quad, float(min(1.0, len(members) / 8.0 + 0.2))))
     line_polys.sort(key=lambda item: float(np.min(item[0][:, 1])))
     return line_polys
 

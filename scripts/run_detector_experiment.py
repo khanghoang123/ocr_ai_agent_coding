@@ -92,12 +92,25 @@ DEFAULT_EXPERIMENTS: list[ExperimentSpec] = [
     ),
     ExperimentSpec(
         exp_id="E2_craft",
-        description="CRAFT word detector + row-clustering line merger.",
+        description=(
+            "CRAFT word detector + y-centroid row clustering "
+            "(curved polys + max-width cap; Phase 3 retune)."
+        ),
         detector_backend="craft",
         detector_kwargs={
-            "row_overlap_ratio": 0.4,
+            # y-centroid-based clustering: 0.6 = a word's y_center must be
+            # within 0.6 * median_word_height of the row mid-line.
+            "row_y_center_tolerance": 0.6,
             "x_pad_ratio": 0.02,
             "y_pad_ratio": 0.10,
+            # Width cap is loose — printed-textbook lines genuinely span the
+            # whole page. Bands are caught by the height cap instead.
+            "max_line_width_ratio": 1.0,
+            # Drop rows taller than 2.5× the median word height — that's how
+            # we kill the paragraph-block bands without dropping legit lines.
+            "max_line_height_word_ratio": 2.5,
+            # CRAFT's getDetBoxes(poly=True) for curved word polygons.
+            "use_curved_polygons": True,
         },
     ),
     ExperimentSpec(

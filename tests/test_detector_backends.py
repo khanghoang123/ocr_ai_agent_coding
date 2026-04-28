@@ -67,6 +67,19 @@ def test_build_detector_unknown_raises():
         build_detector("nonexistent")
 
 
+def test_default_detector_backend_is_kraken():
+    """Phase 3 winner. ``ExperimentConfig`` and ``Settings`` both default
+    to Kraken BLLA; flipping this default is a deliberate, leaderboard-
+    driven decision (see docs/phase3_detector_comparison_results.md) and
+    should not regress without a deliberate code change.
+    """
+    from ocr_pipeline.config import settings
+    from ocr_pipeline.experiment_config import ExperimentConfig
+
+    assert ExperimentConfig().detector_backend == "kraken"
+    assert settings.detector_backend.lower() == "kraken"
+
+
 # ── Empty detection contract ────────────────────────────────────────────────
 
 
@@ -152,6 +165,107 @@ def test_cluster_words_into_lines_single_word():
     word = [np.array([[10, 50], [60, 50], [60, 80], [10, 80]], dtype=float)]
     lines = cluster_words_into_lines(word, image_width=200, image_height=200)
     assert len(lines) == 1
+
+
+def test_cluster_words_into_lines_no_snowballing_across_overlapping_rows():
+    """Phase 3 retune: words on stacked rows whose vertical extents partially
+    overlap (because a descender from row N reaches into row N+1) must NOT
+    collapse into a single band. The old extent-based clustering snowballed
+    here; the new y-centroid clustering should keep them separate.
+    """
+    rows: list[np.ndarray] = []
+    # Row 1 at y_center=100, height=30 (extent 85..115).
+    for x in (10, 100, 200, 300):
+        rows.append(
+            np.array([[x, 85], [x + 60, 85], [x + 60, 115], [x, 115]], dtype=float)
+        )
+    # Row 2 at y_center=130, height=30 (extent 115..145). Row 1 and Row 2
+    # vertical extents touch (115); a descender word would spill across.
+    for x in (10, 100, 200, 300):
+        rows.append(
+            np.array([[x, 115], [x + 60, 115], [x + 60, 145], [x, 145]], dtype=float)
+        )
+    # Row 3 at y_center=160, height=30 (extent 145..175).
+    for x in (10, 100, 200, 300):
+        rows.append(
+            np.array([[x, 145], [x + 60, 145], [x + 60, 175], [x, 175]], dtype=float)
+        )
+    lines = cluster_words_into_lines(rows, image_width=400, image_height=400)
+    # Three distinct rows must remain three lines, not a single fat band.
+    assert len(lines) == 3
+
+
+def test_cluster_words_into_lines_drops_full_width_bands():
+    """The max_line_width_ratio cap should reject misclustered rows whose
+    horizontal extent spans almost the entire page width \u2014 those are the
+    ``soan-bai\u2026`` style paragraph bands the old algorithm produced.
+    """
+    # Build one legitimate narrow row, and one runaway cluster that spans
+    # 95%+ of the page even though the words are at very different y\u2010centers.
+    legit = [
+        np.array([[10, 100], [80, 100], [80, 130], [10, 130]], dtype=float),
+        np.array([[100, 100], [180, 100], [180, 130], [100, 130]], dtype=float),
+    ]
+    # Same y\u2010center band, but spanning x=10..980 \u2014 simulates a misclustered
+    # paragraph block. Both words at y_center=300.
+    runaway = [
+        np.array([[10, 290], [80, 290], [80, 310], [10, 310]], dtype=float),
+        np.array([[900, 290], [980, 290], [980, 310], [900, 310]], dtype=float),
+    ]
+    out = cluster_words_into_lines(
+        legit + runaway,
+        image_width=1000,
+        image_height=1000,
+        max_line_width_ratio=0.5,
+    )
+    # The runaway row must be dropped; only the legit line survives.
+    assert len(out) == 1
+    poly, _ = out[0]
+    assert poly[:, 0].max() < 200
+
+
+def test_cluster_words_into_lines_drops_band_via_height_cap():
+    """The ``max_line_height_word_ratio`` cap rejects a row whose merged
+    vertical extent vastly exceeds a typical word-height \u2014 the signature
+    of a paragraph block masquerading as a single line. Width caps don't
+    work for printed textbook lines because real lines naturally span the
+    whole page; height caps do.
+    """
+    # One legit line: 6 words at y_center=100, height=20.
+    legit = [
+        np.array([[x, 90], [x + 25, 90], [x + 25, 110], [x, 110]], dtype=float)
+        for x in range(10, 180, 30)
+    ]
+    # Stacked over-tall \"band\" that the clustering will join because we
+    # set tolerance high enough: words at y=200, 240, 280, 320, 360 (5
+    # rows). With tolerance=10*median_h and median_h=20, all of these
+    # cluster into one row whose height = 360+20 - 200 = 180 (= 9x word_h).
+    band: list[np.ndarray] = []
+    for dy in range(200, 380, 40):
+        for x in range(10, 180, 30):
+            band.append(
+                np.array(
+                    [[x, dy], [x + 25, dy], [x + 25, dy + 20], [x, dy + 20]],
+                    dtype=float,
+                )
+            )
+    out = cluster_words_into_lines(
+        legit + band,
+        image_width=1000,
+        image_height=1000,
+        # 4*median_h = 80px tolerance — large enough to merge band rows
+        # 40px apart, small enough to keep legit (y=100) apart from band
+        # (y=210+).
+        row_y_center_tolerance=4.0,
+        max_line_height_word_ratio=2.5,
+    )
+    # The over-tall band is dropped; only the legit line (height ~22 after
+    # padding) survives.
+    assert len(out) >= 1
+    for poly, _ in out:
+        height = float(poly[:, 1].max() - poly[:, 1].min())
+        # Surviving lines must be near-word-height; bands are dropped.
+        assert height < 60
 
 
 # ── Detector-level metrics ──────────────────────────────────────────────────
