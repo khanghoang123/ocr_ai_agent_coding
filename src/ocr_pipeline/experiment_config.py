@@ -69,6 +69,17 @@ class ExperimentConfig:
     # checkpoints on slanted crops. Overridable per-experiment; defaults
     # to the global Settings value when ``None``.
     rec_no_repeat_ngram_size: int | None = None
+    # KenLM 5-gram rescoring knobs (None = use Settings default).
+    # Set ``rec_kenlm_beam_width`` to >1 in an experiment YAML to
+    # activate beam-search decoding + LM rescoring; it is safe to
+    # leave ``rec_kenlm_path`` unset in that case — if the LM file
+    # doesn't exist the recognizer falls back to the top-1
+    # acoustic hypothesis without crashing (see KenLMRescorer).
+    rec_kenlm_path: str | None = None
+    rec_kenlm_alpha: float | None = None
+    rec_kenlm_beta: float | None = None
+    rec_kenlm_gamma: float | None = None
+    rec_kenlm_beam_width: int | None = None
     unsupported_options: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 

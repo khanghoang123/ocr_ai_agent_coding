@@ -432,20 +432,7 @@ class OCRPipeline:
                 horizontal_padding_ratio=config.horizontal_padding_ratio,
                 max_deskew_angle=config.max_deskew_angle,
             ),
-            recognizer=VietOCRRecognizer(
-                weights_path=model_cfg["weights_path"],
-                architecture=model_cfg["architecture"],
-                image_height=model_cfg["image_height"],
-                image_max_width=model_cfg["image_max_width"],
-                image_min_width=model_cfg["image_min_width"],
-                device=settings.rec_device,
-                enable_local_contrast=config.enable_local_contrast,
-                no_repeat_ngram_size=(
-                    config.rec_no_repeat_ngram_size
-                    if config.rec_no_repeat_ngram_size is not None
-                    else settings.rec_no_repeat_ngram_size
-                ),
-            ),
+            recognizer=cls._build_recognizer(config, model_cfg, settings),
             reconstructor=LayoutReconstructor.from_settings(),
             refiner=LineRefiner(
                 rectify_line=config.rectify_line,
@@ -460,6 +447,63 @@ class OCRPipeline:
             unsupported_options=config.unsupported_options,
             rectifier=rectifier,
             save_rectifier_debug=bool(getattr(config, "rectifier_save_debug", True)),
+        )
+
+    @classmethod
+    def _build_recognizer(
+        cls,
+        config,
+        model_cfg: dict,
+        settings,
+    ) -> "VietOCRRecognizer":
+        """Construct VietOCRRecognizer with per-experiment overrides.
+
+        KenLM rescoring is enabled per-experiment via ``rec_kenlm_*``
+        fields on ``ExperimentConfig`` which fall back to the global
+        ``Settings`` values when left as ``None``. When the resolved
+        beam width is 1 the rescorer is not attached — the recognizer
+        falls through to the legacy greedy (or no-repeat-ngram)
+        decode path with no extra cost.
+        """
+        from ocr_pipeline.recognizer.kenlm_rescorer import KenLMRescorer
+
+        def pick(cfg_val, settings_val):
+            return cfg_val if cfg_val is not None else settings_val
+
+        beam_width = int(
+            pick(config.rec_kenlm_beam_width, settings.rec_kenlm_beam_width) or 1
+        )
+        rescorer = None
+        if beam_width > 1:
+            kenlm_path = pick(config.rec_kenlm_path, settings.rec_kenlm_path)
+            rescorer = KenLMRescorer(
+                model_path=kenlm_path,
+                alpha=float(
+                    pick(config.rec_kenlm_alpha, settings.rec_kenlm_alpha)
+                ),
+                beta=float(
+                    pick(config.rec_kenlm_beta, settings.rec_kenlm_beta)
+                ),
+                gamma=float(
+                    pick(config.rec_kenlm_gamma, settings.rec_kenlm_gamma)
+                ),
+            )
+
+        return VietOCRRecognizer(
+            weights_path=model_cfg["weights_path"],
+            architecture=model_cfg["architecture"],
+            image_height=model_cfg["image_height"],
+            image_max_width=model_cfg["image_max_width"],
+            image_min_width=model_cfg["image_min_width"],
+            device=settings.rec_device,
+            enable_local_contrast=config.enable_local_contrast,
+            no_repeat_ngram_size=(
+                config.rec_no_repeat_ngram_size
+                if config.rec_no_repeat_ngram_size is not None
+                else settings.rec_no_repeat_ngram_size
+            ),
+            kenlm_rescorer=rescorer,
+            kenlm_beam_width=beam_width,
         )
 
     def _apply_safe_postprocess(self, page_result: PageResult) -> PageResult:

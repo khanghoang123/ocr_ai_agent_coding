@@ -91,6 +91,27 @@ class Settings(BaseSettings):
     # line are rare (< 1% of GT), so the benefit is expected to dominate.
     rec_no_repeat_ngram_size: int = 3
 
+    # KenLM 5-gram rescoring. When ``rec_kenlm_path`` points to an
+    # existing ``.bin`` or ``.arpa`` file AND ``rec_kenlm_beam_width``
+    # is > 1, the recognizer runs a shallow beam search, produces K
+    # candidates per line, and picks the best by::
+    #
+    #     score = gamma * acoustic_logprob
+    #           + alpha * lm_logprob
+    #           + beta  * word_count
+    #
+    # When the file is missing or kenlm is not installed, the
+    # rescorer silently degrades to a no-op and the recognizer
+    # returns the top-1 acoustic hypothesis unchanged. Do NOT set
+    # ``rec_kenlm_beam_width=1`` when the LM is configured — a beam
+    # of 1 produces only the top-1 candidate and there is nothing to
+    # rescore. Typical values: alpha=0.5, beta=0.1, beam_width=5.
+    rec_kenlm_path: Optional[str] = None
+    rec_kenlm_alpha: float = 0.5
+    rec_kenlm_beta: float = 0.1
+    rec_kenlm_gamma: float = 1.0
+    rec_kenlm_beam_width: int = 1  # 1 = disabled
+
     # ── Pipeline settings ────────────────────────────────────
     crop_padding: int = 4           # Pixels to add around each detected bbox
     min_line_height: int = 8        # Minimum line height (px) — filters noise
