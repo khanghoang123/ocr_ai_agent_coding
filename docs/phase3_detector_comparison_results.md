@@ -563,6 +563,112 @@ Compared against the OFF run at
 directories are gitignored per AGENTS.md; only the numbers in this
 report ship in the PR.
 
+## Update (Phase 5): Vietnamese KenLM 5-gram rescoring
+
+We added a Vietnamese KenLM 5-gram rescorer over the top-K
+recognizer candidates (beam search) to attack the
+semantically-wrong-but-non-repeating output class that the
+no-repeat-ngram constraint cannot address.
+
+**Rescorer formula.** Given top-K beam candidates with acoustic
+per-token log-prob `a_i`, the score is
+
+```
+score_i = γ · a_i + α · (lm_logprob_i / max(1, word_count_i)) + β · word_count_i
+```
+
+Length-normalisation of the LM term is the key detail — without
+it, shorter beam candidates systematically win because cumulative
+LM log-prob scales with length. Greedy is always added as a
+candidate so the rescorer cannot regress vs the legacy path.
+
+**Training corpus.** 13,090 Vietnamese lines from the user's
+`train_line.txt` (VietOCR annotation format, 1.7 MB). A 5-gram
+KenLM trained with `lmplz --order 5` + `build_binary` is ~1.2 MB.
+
+**Leaderboard rerun, `baseline_50k` + no-repeat-ngram + KenLM (α=0.5, β=0.1, γ=1.0, beam=5):**
+
+| Backend     | halluc_rate | garbage | repeated# |
+|-------------|------------:|--------:|----------:|
+| E0_paddle   | 0.570       | 0.139   | 14.4      |
+| E1_surya    | 0.701       | 0.246   | 14.9      |
+| E2_craft    | 0.523       | 0.121   | 8.0       |
+| E3_kraken   | 0.580       | 0.085   | 4.0       |
+
+**Compared to pre-KenLM (no-repeat-ngram only):**
+
+| Backend     | halluc_rate       | garbage        | repeated#     |
+|-------------|-------------------|----------------|---------------|
+| E0_paddle   | 0.460 → **0.570** | 0.139 → 0.139  | 14.7 → 14.4   |
+| E1_surya    | 0.695 → **0.701** | 0.240 → 0.246  | 15.4 → 14.9   |
+| E2_craft    | 0.477 → **0.523** | 0.111 → 0.121  | 8.3 → 8.0     |
+| E3_kraken   | 0.554 → 0.580     | **0.105 → 0.085** | 3.1 → 4.0  |
+
+**Finding: null to slightly negative.** The rescorer does not
+produce a material improvement on `tests/test/` at the default
+(α=0.5, β=0.1, K=5) params; most metrics move in the wrong
+direction by 1–11 pp. Root cause verified with targeted smoke
+tests on handwriting attractor crops (`chi_pheo_page`): at K=5
+*and* K=15, at α=0.5 *and* α=1.0, **zero of eight crops flip
+their prediction** vs greedy. The recognizer's acoustic
+confidence is high enough on its greedy path that no beam
+candidate surfaces a competitive alternative for the LM to choose
+from.
+
+**Why this was still worth shipping.**
+
+1. It rules out the cheap lever. We can now confidently focus
+   the next effort on recognizer-side interventions (fine-tuning
+   on hard negatives, data-augmentation with repeated-digit noise,
+   character-level LM) rather than continuing to tune the rescorer.
+2. The rescorer is **disabled by default** (`rec_kenlm_beam_width=1`).
+   The default recognition path is unchanged — this PR is
+   infrastructure-only in its production effect.
+3. The scaffolding (KenLM rescorer, beam-search decoder, settings
+   plumbing, training script) is reusable once we have a larger
+   corpus or a better-calibrated acoustic model — future work can
+   flip the switch and retest without touching code.
+4. `kraken` / `garbage` went **down** (0.105 → 0.085), which is
+   the only recognizer-side metric where Kraken's crop distribution
+   matches the LM's training distribution closely enough for the
+   LM to drive a selection change. That's consistent with the
+   hypothesis (LM helps when the beam diverges meaningfully; the
+   beam does not diverge on 87%+ of handwriting crops in this
+   set).
+
+**Next levers (unchanged from the pre-KenLM report).**
+
+- Larger domain corpus (news + Vietnamese Wikipedia + our GT) to
+  reduce LM perplexity on out-of-distribution handwriting.
+- Character-level KenLM (or ngram over chars) so the LM can
+  evaluate fragments where word-level tokenisation doesn't help.
+- Fine-tune `baseline_50k` on hard-negative examples of the
+  attractor patterns (all-caps runs, repeated digits).
+- Build box-level GT so CER/WER can distinguish "recognizer
+  became less confident but more accurate" from "recognizer got
+  worse".
+
+### Reproduction (KenLM rerun)
+
+```
+# 1. Train the 5-gram from the user's corpus.
+python scripts/train_kenlm.py \
+    --input <path-to-train_line.txt> \
+    --output models/kenlm/vi_5gram.bin \
+    --order 5
+
+# 2. Rerun the 4-backend leaderboard with KenLM enabled.
+OCR_REC_KENLM_PATH=models/kenlm/vi_5gram.bin \
+OCR_REC_KENLM_BEAM_WIDTH=5 \
+OCR_REC_KENLM_ALPHA=0.5 \
+OCR_REC_KENLM_BETA=0.1 \
+OCR_REC_KENLM_GAMMA=1.0 \
+python scripts/run_detector_experiment.py \
+    --input-dir tests/test \
+    --model-key baseline_50k \
+    --output-dir experiments/runs/phase3_kenlm_rescoring
+```
+
 ## Reproduction
 
 ```

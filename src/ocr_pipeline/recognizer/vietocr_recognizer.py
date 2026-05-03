@@ -17,11 +17,14 @@ from dataclasses import dataclass
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import cv2
 import numpy as np
 from PIL import Image
+
+if TYPE_CHECKING:
+    from ocr_pipeline.recognizer.kenlm_rescorer import Candidate
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +252,8 @@ class VietOCRRecognizer:
         device: str = "cpu",
         enable_local_contrast: bool = True,
         no_repeat_ngram_size: int = 0,
+        kenlm_rescorer: object | None = None,
+        kenlm_beam_width: int = 1,
     ):
         self.weights_path = str(weights_path)
         self.architecture = architecture
@@ -262,6 +267,15 @@ class VietOCRRecognizer:
         # in the same line. Used to suppress the repeating-digit
         # attractor observed with fine-tuned checkpoints.
         self.no_repeat_ngram_size = int(no_repeat_ngram_size or 0)
+        # KenLM 5-gram rescoring. When ``kenlm_beam_width > 1`` AND a
+        # ``KenLMRescorer`` is attached, the recognizer maintains
+        # ``beam_width`` partial hypotheses per decoder step, then
+        # picks the best by (acoustic + alpha*LM + beta*word_count).
+        # If the LM file is missing or kenlm is not installed, the
+        # rescorer silently degrades to a no-op and the top-1
+        # acoustic hypothesis is returned.
+        self.kenlm_beam_width = max(1, int(kenlm_beam_width or 1))
+        self.kenlm_rescorer = kenlm_rescorer
         self._preprocessor = RecognitionPreprocessor(
             target_height=image_height,
             enable_local_contrast=enable_local_contrast,
@@ -302,29 +316,42 @@ class VietOCRRecognizer:
         cfg["dataset"]["image_min_width"] = self.image_min_width
         predictor_cfg = cfg.setdefault("predictor", {})
         beam_enabled = isinstance(predictor_cfg, dict)
-        # The no-repeat-ngram constraint runs in our own greedy decode
-        # path — force beamsearch off when it is enabled.
+        # Our custom greedy/beam paths handle the no-repeat-ngram
+        # constraint and KenLM rescoring. Force vietocr's own
+        # beamsearch off whenever we intend to run a custom decode
+        # path, so the predictor's internal decode logic doesn't
+        # override ours.
+        custom_decode = (
+            self.no_repeat_ngram_size > 0 or self.kenlm_beam_width > 1
+        )
         if beam_enabled:
-            predictor_cfg["beamsearch"] = (
-                False if self.no_repeat_ngram_size > 0 else True
-            )
+            predictor_cfg["beamsearch"] = False if custom_decode else True
         try:
             self._predictor = Predictor(cfg)
-            if self.no_repeat_ngram_size > 0:
-                self._decode_mode = f"greedy+no_repeat_ngram_{self.no_repeat_ngram_size}"
-            else:
-                self._decode_mode = "beam" if beam_enabled else "greedy"
+            self._decode_mode = self._compute_decode_mode(beam_enabled)
         except Exception:
             if not beam_enabled:
                 raise
             predictor_cfg["beamsearch"] = False
             self._predictor = Predictor(cfg)
-            self._decode_mode = (
-                f"greedy+no_repeat_ngram_{self.no_repeat_ngram_size}"
-                if self.no_repeat_ngram_size > 0
-                else "greedy"
-            )
+            self._decode_mode = self._compute_decode_mode(beam_enabled=False)
         logger.info("VietOCR model loaded successfully.")
+
+    def _compute_decode_mode(self, beam_enabled: bool) -> str:
+        parts: list[str] = []
+        if self.kenlm_beam_width > 1:
+            parts.append(f"beam{self.kenlm_beam_width}")
+        elif self.no_repeat_ngram_size > 0:
+            parts.append("greedy")
+        else:
+            parts.append("beam" if beam_enabled else "greedy")
+        if self.no_repeat_ngram_size > 0:
+            parts.append(f"no_repeat_ngram_{self.no_repeat_ngram_size}")
+        if self.kenlm_beam_width > 1 and getattr(
+            self.kenlm_rescorer, "is_enabled", False
+        ):
+            parts.append("kenlm")
+        return "+".join(parts)
 
     @staticmethod
     def _patch_pillow() -> None:
@@ -530,10 +557,375 @@ class VietOCRRecognizer:
             confidence = float(sum(valid) / len(valid)) if valid else 0.0
             return str(text), confidence
 
+    def _predict_beam_no_repeat_ngram(
+        self,
+        image: Image.Image,
+        beam_width: int,
+        max_seq_length: int = 128,
+        sos_token: int = 1,
+        eos_token: int = 2,
+    ) -> list[tuple[str, float]]:
+        """Beam-search seq2seq decode with a no-repeat-ngram constraint.
+
+        Returns a list of ``(text, acoustic_mean_prob)`` candidates
+        sorted best-first by cumulative acoustic log-probability. The
+        length of the list is ``<= beam_width`` (beams that finish at
+        ``eos`` are kept; beams that do not finish before
+        ``max_seq_length`` are truncated at the last step).
+
+        The implementation batches the K beams into one
+        ``forward_decoder`` call per step to keep the cost close to K×
+        the greedy path. Memory caching follows the same pattern as
+        ``_predict_no_repeat_ngram``.
+
+        Acoustic score is computed as the **sum of log-probabilities**
+        along the decoded sequence (natural log, base-e). The
+        per-candidate ``acoustic_mean_prob`` returned as the second
+        tuple element matches the confidence reported by the greedy
+        path (mean of per-step probs excluding special tokens) so
+        the metric pipeline is unchanged.
+        """
+        import math
+
+        import torch
+        from torch.nn.functional import softmax
+        from vietocr.tool.translate import process_input
+
+        model = self._predictor.model
+        vocab = self._predictor.vocab
+        device = self._predictor.device
+
+        img = process_input(
+            image,
+            self.image_height,
+            self.image_min_width,
+            self.image_max_width,
+        ).to(device)
+
+        n = int(self.no_repeat_ngram_size)
+        K = max(1, int(beam_width))
+        model.eval()
+        with torch.no_grad():
+            src = model.cnn(img)
+            memory_1 = model.transformer.forward_encoder(src)
+            # ``memory_1`` carries encoder state. For vietocr's seq2seq
+            # architecture it is a ``(hidden, encoder_outputs)`` tuple
+            # where ``hidden`` is the RNN state (which *evolves* over
+            # decoder steps) and ``encoder_outputs`` is constant. For
+            # the transformer architecture it is a single tensor.
+            #
+            # Each beam maintains its own ``memory`` so that the
+            # per-beam hidden trajectory stays consistent when beams
+            # diverge. On each step we stack the K beams' memories
+            # into one tensor, call ``forward_decoder`` once, then
+            # scatter the updated memory back per beam.
+
+            # Each beam has: token list, list of step probs, finished flag,
+            # cumulative acoustic logprob, and its own encoder memory
+            # snapshot (the RNN hidden state at the end of its prefix).
+            beams = [
+                {
+                    "tokens": [sos_token],
+                    "probs": [1.0],
+                    "finished": False,
+                    "logprob": 0.0,
+                    "memory": memory_1,
+                }
+            ]
+            completed: list[dict] = []
+
+            # GNMT-style length penalty (cf. Wu et al. 2016,
+            # eq. 14). Softer than pure avg-logprob: at alpha=0.6 a
+            # 30-token beam is penalised ~2.8x, not 30x, so long-but-
+            # correct outputs survive against short-but-truncated ones.
+            _LP_ALPHA = 0.6
+
+            def _length_norm_score(b: dict) -> float:
+                steps = max(1, len(b["tokens"]) - 1)
+                penalty = ((5.0 + steps) / 6.0) ** _LP_ALPHA
+                return b["logprob"] / penalty
+
+            def _avg_logprob(b: dict) -> float:
+                # For the rescorer interface we still pass per-token
+                # average so candidates of different lengths are
+                # comparable when combined with the LM score.
+                steps = max(1, len(b["tokens"]) - 1)
+                return b["logprob"] / steps
+
+            for _ in range(max_seq_length):
+                if not beams:
+                    break
+
+                # vietocr's seq2seq ``forward_decoder`` slices
+                # ``tgt[-1]``, so we only need the last token per beam
+                # (shape ``[1, N_alive]``). The transformer path
+                # tolerates a single-step input too.
+                last_tokens = [b["tokens"][-1] for b in beams]
+                tgt_inp = torch.LongTensor([last_tokens]).to(device)
+                step_memory = self._stack_memories(
+                    [b["memory"] for b in beams]
+                )
+                output, new_memory = model.transformer.forward_decoder(
+                    tgt_inp, step_memory
+                )
+                # Output shape varies between seq2seq ([B,1,V]) and
+                # transformer ([T,B,V] / [B,T,V]). Grab the last
+                # timestep along whichever axis has size == N.
+                if output.dim() == 3 and output.size(0) == len(beams):
+                    last_logits = output[:, -1, :]
+                else:
+                    last_logits = output[-1, :, :]
+                last_probs = softmax(last_logits, dim=-1).to("cpu")
+
+                # Split the updated memory back into per-beam slices.
+                per_beam_memory = [
+                    self._slice_stacked_memory(new_memory, i)
+                    for i in range(len(beams))
+                ]
+
+                # Mask ngram-repeats per beam.
+                if n > 0:
+                    for b_idx, beam in enumerate(beams):
+                        banned = _banned_next_tokens(beam["tokens"], n)
+                        if banned:
+                            last_probs[b_idx, list(banned)] = 0.0
+
+                # Per-beam top-K expansion → candidate set.
+                topk_vals, topk_idx = torch.topk(last_probs, K, dim=-1)
+
+                candidates: list[dict] = []
+                for b_idx, beam in enumerate(beams):
+                    for k in range(K):
+                        tok = int(topk_idx[b_idx, k].item())
+                        p = float(topk_vals[b_idx, k].item())
+                        lp = math.log(max(p, 1e-30))
+                        candidates.append({
+                            "tokens": beam["tokens"] + [tok],
+                            "probs": beam["probs"] + [p],
+                            "finished": tok == eos_token,
+                            "logprob": beam["logprob"] + lp,
+                            "memory": per_beam_memory[b_idx],
+                        })
+
+                # Split into completed-this-step (EOS) and alive.
+                alive: list[dict] = []
+                for c in candidates:
+                    if c["finished"]:
+                        # Drop the memory on completed beams — we
+                        # won't step them again and it wastes RAM.
+                        c.pop("memory", None)
+                        completed.append(c)
+                    else:
+                        alive.append(c)
+
+                # Sort ALIVE beams by raw cumulative logprob (standard
+                # beam search). Length normalisation is applied only at
+                # *final* ranking so we don't prematurely cull longer
+                # partials that happen to have a few uncertain tokens.
+                alive.sort(key=lambda b: b["logprob"], reverse=True)
+                beams = alive[:K]
+
+                # Early stop only when every alive beam is guaranteed
+                # to be worse than the best completed beam, even
+                # without penalising length. Since each extra token
+                # can only decrease ``logprob``, we stop when the
+                # single-best alive beam already scores below the
+                # best completed beam under length-normalisation.
+                if completed and beams:
+                    best_done = max(_length_norm_score(b) for b in completed)
+                    # Use length-norm on alive too so the comparison
+                    # is length-fair. If even the best alive (after
+                    # adding a hypothetical full-length tail) can't
+                    # beat best_done, stop.
+                    best_alive = _length_norm_score(beams[0])
+                    if best_done > best_alive:
+                        break
+
+            # Finalise: any alive beams at max_seq_length count as
+            # (truncated) candidates too.
+            for b in beams:
+                b.pop("memory", None)
+                completed.append(b)
+
+            # Deduplicate by text (keep best logprob per unique text).
+            by_text: dict[str, dict] = {}
+            for b in completed:
+                text = str(vocab.decode(b["tokens"]))
+                if text not in by_text or b["logprob"] > by_text[text]["logprob"]:
+                    b = dict(b, _text=text)
+                    by_text[text] = b
+
+            # Rank final candidates by GNMT length-normalised logprob
+            # so the top-K returned is a meaningful shortlist.
+            final = sorted(
+                by_text.values(), key=_length_norm_score, reverse=True
+            )[:K]
+
+            results: list[tuple[str, float, float]] = []
+            for beam in final:
+                text = beam["_text"]
+                valid = [p for p, t in zip(beam["probs"], beam["tokens"]) if t > 3]
+                conf = float(sum(valid) / len(valid)) if valid else 0.0
+                # Return LENGTH-NORMALISED acoustic logprob so
+                # candidates of different lengths are comparable when
+                # the rescorer combines them with the LM score.
+                results.append((text, conf, _avg_logprob(beam)))
+
+            return results
+
+    @staticmethod
+    def _batch_dim(t) -> int:
+        """Return the batch dimension of a vietocr encoder tensor.
+
+        Seq2seq hidden state is ``[B, D]`` (batch dim 0), while
+        ``encoder_outputs`` and transformer memory are ``[T, B, D]``
+        (batch dim 1). We use the rule: dim 1 if the tensor is 3D,
+        else dim 0. This matches vietocr's internal shape conventions
+        (see vietocr.model.seqmodel.seq2seq.Seq2Seq.forward_decoder
+        and vietocr.model.seqmodel.transformer.LanguageTransformer).
+        """
+        return 1 if t.dim() == 3 else 0
+
+    @classmethod
+    def _stack_memories(cls, memories):
+        """Stack a list of per-beam memories into a single batched memory.
+
+        Each element in ``memories`` has batch dim = 1 (or is already
+        batched, in which case we just concatenate along the batch
+        axis). This lets us call ``forward_decoder`` once for all K
+        beams and then scatter the output back.
+        """
+        import torch
+
+        if not memories:
+            return memories
+        first = memories[0]
+        if torch.is_tensor(first):
+            axis = cls._batch_dim(first)
+            return torch.cat(memories, dim=axis)
+        if isinstance(first, (tuple, list)):
+            parts = []
+            for i in range(len(first)):
+                parts.append(cls._stack_memories([m[i] for m in memories]))
+            return type(first)(parts)
+        return first
+
+    @classmethod
+    def _slice_stacked_memory(cls, memory, index: int):
+        """Return the single-beam slice at ``index`` of a stacked memory.
+
+        The returned slice keeps the batch dim (size 1), i.e. shapes
+        ``[1, D]`` or ``[T, 1, D]``, so that it can be round-tripped
+        through ``_stack_memories`` again on the next step.
+        """
+        import torch
+
+        if torch.is_tensor(memory):
+            axis = cls._batch_dim(memory)
+            # ``narrow`` keeps the dim with size 1 (vs indexing which
+            # drops it) so the shape stays compatible with the
+            # decoder's expected input.
+            return memory.narrow(axis, index, 1)
+        if isinstance(memory, (tuple, list)):
+            return type(memory)(
+                cls._slice_stacked_memory(m, index) for m in memory
+            )
+        return memory
+
+    def _predict_candidates(
+        self,
+        image: Image.Image,
+    ) -> list["Candidate"]:
+        """Return the recognizer's top-K candidates for one crop.
+
+        When ``kenlm_beam_width > 1``, runs a beam-search decode (with
+        the no-repeat-ngram mask if enabled) and returns the full
+        candidate list. Otherwise, runs the existing greedy path and
+        returns a single candidate.
+
+        The result is ``list[Candidate]`` where ``Candidate.text`` is
+        the decoded string and ``Candidate.acoustic_logprob`` is the
+        sum of per-step natural-log probabilities (0.0 for the
+        greedy path which does not accumulate).
+        """
+        from ocr_pipeline.recognizer.kenlm_rescorer import Candidate
+
+        if self.kenlm_beam_width > 1:
+            triples = self._predict_beam_no_repeat_ngram(
+                image, beam_width=self.kenlm_beam_width
+            )
+            # Narrow beams (K=5) sometimes drop the argmax path at a
+            # shared-prefix fork (e.g. "việc " vs "trình ") because the
+            # model's next-token distribution diffuses after a space.
+            # Always include the greedy prediction as a candidate so
+            # rescoring can never do worse than the legacy path.
+            #
+            # The greedy path returns a per-step mean probability
+            # (confidence). Converting that to a natural-log per-token
+            # score (``log(max(conf, eps))``) makes the greedy
+            # candidate's acoustic score commensurate with the
+            # beam candidates (which also carry a per-token average
+            # logprob — see ``_predict_beam_no_repeat_ngram``).
+            import math
+
+            candidates: list[Candidate] = []
+            seen_texts: set[str] = set()
+            if self.no_repeat_ngram_size > 0:
+                greedy_text, greedy_conf = self._predict_no_repeat_ngram(image)
+            else:
+                prediction = self._predictor.predict(image, return_prob=True)
+                if isinstance(prediction, tuple):
+                    greedy_text = prediction[0] or ""
+                    greedy_conf = (
+                        float(prediction[1]) if len(prediction) > 1 else 0.0
+                    )
+                else:
+                    greedy_text = prediction or ""
+                    greedy_conf = 0.0
+            greedy_text = str(greedy_text)
+            greedy_acoustic = math.log(max(float(greedy_conf), 1e-30))
+            if greedy_text and greedy_text not in seen_texts:
+                candidates.append(
+                    Candidate(
+                        text=greedy_text,
+                        acoustic_logprob=greedy_acoustic,
+                    )
+                )
+                seen_texts.add(greedy_text)
+            for (t, _conf, lp) in triples:
+                if t in seen_texts:
+                    continue
+                candidates.append(Candidate(text=t, acoustic_logprob=float(lp)))
+                seen_texts.add(t)
+            return candidates
+        if self.no_repeat_ngram_size > 0:
+            text, _conf = self._predict_no_repeat_ngram(image)
+            return [Candidate(text=text, acoustic_logprob=0.0)]
+        # Legacy vietocr path — text only.
+        prediction = self._predictor.predict(image, return_prob=True)
+        if isinstance(prediction, tuple):
+            text = prediction[0] or ""
+        else:
+            text = prediction or ""
+        return [Candidate(text=str(text), acoustic_logprob=0.0)]
+
     def _predict_with_optional_probability(
         self,
         image: Image.Image,
     ) -> tuple[str, float]:
+        # Beam + KenLM rescoring path. Uses ``_predict_candidates``
+        # which always includes the greedy prediction so rescoring
+        # cannot regress vs the legacy path.
+        if self.kenlm_beam_width > 1:
+            from ocr_pipeline.recognizer.kenlm_rescorer import _NullRescorer
+
+            candidates = self._predict_candidates(image)
+            if not candidates:
+                return "", 0.0
+            rescorer = self.kenlm_rescorer or _NullRescorer()
+            result = rescorer.rescore_candidates(candidates)
+            return result.text, 0.0
+
         if self.no_repeat_ngram_size > 0:
             return self._predict_no_repeat_ngram(image)
         prediction = self._predictor.predict(image, return_prob=True)
@@ -577,7 +969,16 @@ class VietOCRRecognizer:
     def from_settings(cls, model_key: Optional[str] = None) -> "VietOCRRecognizer":
         """Create a recognizer from the global settings + model registry."""
         from ocr_pipeline.config import settings
+        from ocr_pipeline.recognizer.kenlm_rescorer import KenLMRescorer
+
         model_cfg = settings.get_model_config(model_key)
+        beam_width = int(settings.rec_kenlm_beam_width or 1)
+        rescorer = None
+        if beam_width > 1:
+            # We attach the rescorer unconditionally when beam>1; the
+            # rescorer itself decides at load time whether to operate
+            # in no-op mode (missing .bin, no kenlm, etc.).
+            rescorer = KenLMRescorer.from_settings()
         return cls(
             weights_path=model_cfg["weights_path"],
             architecture=model_cfg["architecture"],
@@ -586,4 +987,6 @@ class VietOCRRecognizer:
             image_min_width=model_cfg["image_min_width"],
             device=settings.rec_device,
             no_repeat_ngram_size=settings.rec_no_repeat_ngram_size,
+            kenlm_rescorer=rescorer,
+            kenlm_beam_width=beam_width,
         )
