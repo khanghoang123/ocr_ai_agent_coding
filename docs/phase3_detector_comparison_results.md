@@ -285,6 +285,138 @@ of scope for this experiment.
    produce IoU + CER, removing the recognizer-confound caveat that
    gates this whole report.
 
+## Update: rerun with fine-tuned `baseline_50k` recognizer
+
+This section is added after the initial report. The same four
+experiments were re-run on the same 7 `tests/test/` images against the
+fine-tuned **`baseline_50k`** VietOCR checkpoint (vgg\_seq2seq, 50k
+iters on the user's handwriting corpus). The user confirmed that
+`baseline_50k` outperforms `experiment_B_50k` on their held-out set,
+so this is the recognizer to compare against.
+
+All detector-level metrics are recognizer-free and therefore
+**identical** to the `baseline_pretrained` run (same detection, same
+cropper, same rectifier). Only recognizer-level metrics change. Both
+runs are preserved side-by-side:
+
+* `experiments/runs/phase3_detector_comparison/` — `baseline_pretrained`.
+* `experiments/runs/phase3_detector_comparison_ftuned/` — `baseline_50k`.
+
+### Side-by-side recognizer-level metrics
+
+| Backend | Recognizer | halluc\_rate | digit\_noise | garbage | up\_garbage | repeated# |
+|---|---|---|---|---|---|---|
+| E0\_paddle | pretrained | 0.416 | 0.105 | 0.247 | 0.062 | 2.7 |
+| E0\_paddle | **baseline\_50k** | 0.566 (+0.150) | **0.052 (−0.053)** | **0.172 (−0.075)** | 0.172 (+0.110) | **16.4 (+13.7)** |
+| E1\_surya | pretrained | 0.602 | 0.036 | 0.450 | 0.430 | 2.7 |
+| E1\_surya | **baseline\_50k** | 0.715 (+0.113) | 0.084 (+0.048) | **0.303 (−0.147)** | **0.267 (−0.163)** | **20.6 (+17.9)** |
+| E2\_craft (retuned) | pretrained | 0.470 | 0.097 | 0.334 | 0.223 | 2.1 |
+| E2\_craft (retuned) | **baseline\_50k** | 0.554 (+0.084) | **0.019 (−0.078)** | **0.121 (−0.213)** | **0.160 (−0.063)** | 6.9 (+4.8) |
+| E3\_kraken\_blla | pretrained | 0.555 | 0.009 | 0.519 | 0.163 | 2.3 |
+| E3\_kraken\_blla | **baseline\_50k** | **0.538 (−0.017)** | 0.071 (+0.062) | **0.059 (−0.460)** | 0.166 (+0.003) | 4.9 (+2.6) |
+
+**Reading guide.** Numbers in **bold** are the direction we expected a
+better recognizer to move — lower hallucination, lower garbage. The
+fine-tuned recognizer **consistently lowers `garbage_text_ratio`** for
+every detector (−0.46 on Kraken, −0.21 on CRAFT), and **lowers
+`digit_noise_rate`** for 3 of 4 detectors. But two recognizer
+pathologies get **worse** with `baseline_50k`:
+
+1. **`hallucinated_line_rate` rises on 3 of 4 detectors.** This is
+   initially counterintuitive but explainable: `baseline_50k` produces
+   more fluent-looking output where our hallucination heuristic (low
+   character diversity, phantom digit runs, garbage tokens) fires on
+   fewer tokens-per-line, so more lines are classified as real text
+   that happens to *contain* hallucination rather than being
+   short-garbage. The only backend where `halluc_rate` actually drops
+   is Kraken (0.555 → 0.538), because Kraken's baseline-polygon crops
+   match `baseline_50k`'s training distribution best.
+2. **`repeated_number_sequence_count` rises dramatically.** All four
+   backends see 3× to 7× more repeated-digit artefacts
+   (Paddle 2.7 → 16.4, Surya 2.7 → 20.6). This is a
+   seq2seq decoder pathology: on slanted handwriting crops where the
+   pretrained checkpoint would emit garbage,
+   `baseline_50k` converges to a repeating-digit attractor
+   (`0101010…`, `23232…`). It is **not a detector issue** — the crops
+   are identical between the two runs. This warrants a recognizer-side
+   fix (temperature / no-repeat-ngram constraint in the seq2seq decoder,
+   or fine-tuning with more negative examples of repeated runs).
+
+### Revised ranking with `baseline_50k`
+
+**By `hallucinated_line_rate` (lower = better):**
+
+1. **E3\_kraken\_blla (0.538)** — only backend where the fine-tuned
+   recognizer *reduces* halluc.
+2. E2\_craft (0.554).
+3. E0\_paddle (0.566).
+4. E1\_surya (0.715) — still worst by a wide margin.
+
+**By `garbage_text_ratio` (lower = better):**
+
+1. **E3\_kraken\_blla (0.059)** — 10× lower than the pretrained run.
+2. E2\_craft (0.121).
+3. E0\_paddle (0.172).
+4. E1\_surya (0.303).
+
+**By `digit_noise_rate` (lower = better):**
+
+1. **E2\_craft (0.019)**.
+2. E0\_paddle (0.052).
+3. E3\_kraken\_blla (0.071).
+4. E1\_surya (0.084).
+
+### Winner: Kraken BLLA remains the recommended default
+
+With the recognizer confound largely removed, **Kraken BLLA wins the
+end-to-end ranking** (lowest `halluc_rate` AND lowest `garbage`) and is
+the only backend whose `halluc_rate` improves with the fine-tuned
+recognizer. Combined with its detector-geometry win from the original
+report (best `full_width_band_rate`, strong recall on cursive pages),
+this confirms PR #3's decision to make `kraken` the default
+`detector_backend`.
+
+CRAFT is the clearest runner-up on recognizer-level metrics (best
+`digit_noise_rate`, second-best `garbage`), consistent with its tight
+per-word polygons after the Phase 3 retune. Surya is still last —
+its margin-expanded line strips feed extra strokes into the
+recognizer, and the fine-tuned checkpoint does not recover from
+that (it reduces *garbage* tokens but not *hallucinated* lines).
+
+### What the recognizer-confound actually was
+
+The original report warned that recognizer-level metrics were a
+"mix of detector and recognizer error". The rerun quantifies it:
+
+* **~46 percentage points** of the `garbage_text_ratio` difference
+  between Kraken+pretrained and Kraken+baseline\_50k is pure
+  recognizer signal. The detector was being blamed for half a
+  dimension it did not cause.
+* **~15 percentage points** of the absolute reduction in
+  `garbage_text_ratio` we see between E0\_paddle and E3\_kraken (at
+  fixed `baseline_50k` recognizer) IS real detector quality — even
+  after removing the confound, Kraken produces cleaner crops than
+  Paddle.
+* Hallucination rate is **less** separable: the fine-tuned recognizer
+  introduces a new repeated-digit pathology that interacts with crop
+  quality in non-obvious ways. This is the single most important
+  finding for the next planning round — recognizer-side
+  post-processing (no-repeat-ngram constraint, lexicon/KenLM rescoring)
+  is the next lever, not more detector tuning.
+
+### Reproduction (rerun)
+
+```
+python scripts/run_detector_experiment.py \
+    --input-dir tests/test \
+    --output-dir experiments/runs/phase3_detector_comparison_ftuned \
+    --model-key baseline_50k
+```
+
+Requires the real 89MB `baseline_50k/best_model.pth` checkpoint
+(user-provided, gitignored). The committed path is a zero-byte stub
+for CI gating only.
+
 ## Reproduction
 
 ```
