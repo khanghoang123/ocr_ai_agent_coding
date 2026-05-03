@@ -1,17 +1,79 @@
-default: baseline_pretrained
+default: experiment_B_50k
 models:
+  # ─── Fine-tuned experiment checkpoints ────────────────────────────────────
+  # These are the three recognizer checkpoints surfaced to the API
+  # `/models` catalog and the frontend model picker. The weight files
+  # themselves are not committed to the repo (they live under
+  # `models/experiments/<key>/best_model.pth`). For CI quality gates we
+  # ship zero-byte `best_model.pth` stubs so the catalog-filter path
+  # (`weights_exists is True`) works without shipping real weights.
+  # Replace the stub with a real checkpoint locally to run inference.
+  baseline_10k:
+    name: VietOCR baseline (10k iters)
+    display_name: VietOCR baseline · 10k
+    description: |
+      Fine-tuned VietOCR vgg_seq2seq checkpoint trained for 10k
+      iterations on the project's Vietnamese handwriting dataset.
+      Sharpens the public pretrained checkpoint on handwriting
+      distribution without the full training budget of experiment_B.
+    weights_path: models/experiments/baseline_10k/best_model.pth
+    architecture: vgg_seq2seq
+    image_height: 32
+    image_max_width: 690
+    image_min_width: 32
+    training_iters: 10000
+    inference_only: true
+    status: inference
+    recommended: false
+  baseline_50k:
+    name: VietOCR baseline (50k iters)
+    display_name: VietOCR baseline · 50k
+    description: |
+      Longer-trained (50k iterations) fine-tune of the VietOCR
+      vgg_seq2seq baseline on Vietnamese handwriting. Used as a
+      direct A/B comparison against the architectural experiment
+      (`experiment_B_50k`) at the same training budget.
+    weights_path: models/experiments/baseline_50k/best_model.pth
+    architecture: vgg_seq2seq
+    image_height: 32
+    image_max_width: 690
+    image_min_width: 32
+    training_iters: 50000
+    inference_only: true
+    status: inference
+    recommended: false
+  experiment_B_50k:
+    name: VietOCR Experiment B (50k iters)
+    display_name: VietOCR Experiment B · 50k
+    description: |
+      Project's recommended recognizer. Architectural experiment B
+      trained for 50k iterations on the same Vietnamese handwriting
+      dataset. Surfaces as the default model key in the API catalog
+      and the Streamlit frontend.
+    weights_path: models/experiments/experiment_B_50k/best_model.pth
+    architecture: vgg_seq2seq
+    image_height: 32
+    image_max_width: 690
+    image_min_width: 32
+    training_iters: 50000
+    inference_only: true
+    status: inference
+    recommended: true
+
+  # ─── Public pretrained (used by Phase 2C rectifier eval) ──────────────────
+  # Not surfaced in the inference catalog; kept for offline experiments
+  # that want a recognizer-neutral baseline.
   baseline_pretrained:
     name: VietOCR baseline (vgg_seq2seq pretrained)
     display_name: VietOCR vgg_seq2seq (pretrained)
     description: |
       Public VietOCR vgg_seq2seq pretrained checkpoint
-      (https://vocr.vn/data/vietocr/vgg_seq2seq.pth). Used for the Phase 2C
-      rectification before/after eval as a stand-in for the project's own
-      fine-tuned `experiment_B_50k`, which is not present in this repo. The
-      hallucination patterns reported by the project (uppercase abbreviation
-      tokens, repeated 0/1 sequences) are present in this base model too —
-      the rectifier targets *geometry*, not the recognizer, so this is a
-      fair proxy for showing whether page-level rectification helps.
+      (https://vocr.vn/data/vietocr/vgg_seq2seq.pth). Used for the
+      Phase 2C rectification before/after eval as a stand-in for
+      the project's fine-tuned `experiment_B_50k` when the latter
+      is unavailable. Excluded from the `/models` catalog by
+      `status: ready` so the API only surfaces the three
+      inference-ready fine-tunes above.
     weights_path: models/vietocr_vgg_seq2seq.pt
     architecture: vgg_seq2seq
     image_height: 32
@@ -19,4 +81,4 @@ models:
     image_min_width: 32
     inference_only: true
     status: ready
-    recommended: true
+    recommended: false

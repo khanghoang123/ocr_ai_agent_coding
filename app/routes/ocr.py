@@ -43,9 +43,21 @@ router = APIRouter()
     tags=["utility"],
 )
 async def health() -> HealthResponse:
-    """Returns model status, device info, and API version."""
-    import torch
+    """Returns model status, device info, and API version.
+
+    The `torch` import is guarded so `/health` keeps working on lightweight
+    deployments (e.g. the CI quality-gate image defined in
+    `requirements-ci.txt`) that intentionally exclude the heavy recognizer
+    stack. When torch is unavailable we report `gpu_available=False`
+    instead of crashing with `ModuleNotFoundError`.
+    """
     from ocr_pipeline.config import settings
+
+    try:
+        import torch
+        gpu_available = torch.cuda.is_available()
+    except ImportError:
+        gpu_available = False
 
     pipeline = get_pipeline()
 
@@ -53,7 +65,7 @@ async def health() -> HealthResponse:
         status="ok",
         model_loaded=pipeline.model_key,
         device=settings.rec_device,
-        gpu_available=torch.cuda.is_available(),
+        gpu_available=gpu_available,
         version=settings.api_version,
     )
 

@@ -156,6 +156,15 @@ models/*
 !models/*.yml
 !models/*.md
 !models/README*
+# Allow the three CI stub checkpoints (zero-effort marker files used by
+# tests/test_model_registry.py — real weights are pulled locally).
+!models/experiments/
+!models/experiments/baseline_10k/
+!models/experiments/baseline_10k/best_model.pth
+!models/experiments/baseline_50k/
+!models/experiments/baseline_50k/best_model.pth
+!models/experiments/experiment_B_50k/
+!models/experiments/experiment_B_50k/best_model.pth
 experiments/runs/
 experiments/leaderboard/
 data/
@@ -170,3 +179,7 @@ tests/output/
 =0.3.13
 Dataset/
 Dataset/
+# Re-allow the stub checkpoints after the global *.pth rule (ordering matters).
+!models/experiments/baseline_10k/best_model.pth
+!models/experiments/baseline_50k/best_model.pth
+!models/experiments/experiment_B_50k/best_model.pth
