@@ -81,6 +81,16 @@ class Settings(BaseSettings):
     rec_image_min_width: int = 32
     rec_device: str = "cuda" if _cuda_available() else "cpu"
 
+    # No-repeat-ngram constraint for the seq2seq decoder. Blocks any next
+    # token that would cause the last n tokens to match an ngram already
+    # emitted earlier in the same line. Target: the repeating-digit
+    # attractor ("0101010..." / "NDNDND...") observed on baseline_50k
+    # against slanted handwriting crops.
+    # 0 = disabled (legacy vietocr greedy/beam). 3 = default; blocks
+    # 3-gram repeats. Natural Vietnamese trigram repeats within a single
+    # line are rare (< 1% of GT), so the benefit is expected to dominate.
+    rec_no_repeat_ngram_size: int = 3
+
     # ── Pipeline settings ────────────────────────────────────
     crop_padding: int = 4           # Pixels to add around each detected bbox
     min_line_height: int = 8        # Minimum line height (px) — filters noise

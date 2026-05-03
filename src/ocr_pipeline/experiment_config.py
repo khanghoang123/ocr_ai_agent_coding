@@ -64,6 +64,11 @@ class ExperimentConfig:
     detector_backend: str = "kraken"
     detector_allow_grid_fallback: bool = False
     detector_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Seq2seq decoder no-repeat-ngram constraint (0 disables).
+    # Suppresses the repeating-digit attractor observed with fine-tuned
+    # checkpoints on slanted crops. Overridable per-experiment; defaults
+    # to the global Settings value when ``None``.
+    rec_no_repeat_ngram_size: int | None = None
     unsupported_options: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
