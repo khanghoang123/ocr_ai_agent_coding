@@ -1,0 +1,6 @@
+# CI stub — not a real VietOCR checkpoint.
+# Replace with a real .pth checkpoint locally to enable inference
+# with this model key. The repo deliberately ships a zero-effort
+# marker here so tests that verify registry hygiene
+# (tests/test_model_registry.py::test_model_configs_resolve_existing_weight_paths)
+# pass in the lightweight CI image defined by requirements-ci.txt.
