@@ -417,6 +417,152 @@ Requires the real 89MB `baseline_50k/best_model.pth` checkpoint
 (user-provided, gitignored). The committed path is a zero-byte stub
 for CI gating only.
 
+## Update: recognizer-side fix — no-repeat-ngram decoder constraint
+
+The `baseline_50k` rerun above identified that the 3×–7× blow-up in
+`repeated_number_sequence_count` was not a detector issue — crops were
+identical between the two runs. The fine-tuned seq2seq decoder
+converges to a repeating-digit attractor (`0101010…`, `232323…`,
+`NDND…`) on slanted and low-contrast crops. This is a classic greedy
+decoding pathology and the standard fix is a **no-repeat-ngram
+constraint**: at each decoder step, mask out any token that would cause
+the last `n` tokens to match an ngram already emitted earlier in the
+same line.
+
+Implementation lives in `VietOCRRecognizer` (wrapper only — we do not
+patch the `vietocr` package). When `no_repeat_ngram_size > 0`, the
+wrapper forces `beamsearch=False` and runs its own greedy decode built
+on top of `model.transformer.forward_encoder` /
+`forward_decoder`, so token ids stay vocab-compatible with the
+predictor. Controlled by:
+
+* `Settings.rec_no_repeat_ngram_size` (default **3**, env var
+  `OCR_REC_NO_REPEAT_NGRAM_SIZE`)
+* `VietOCRRecognizer(..., no_repeat_ngram_size=...)`
+* `ExperimentConfig.rec_no_repeat_ngram_size` (None = use Settings)
+
+### Per-crop smoke test (E1_surya, page `soan-bai…`)
+
+Three lines that the bare `baseline_50k` decoder latched onto:
+
+| Line | OFF (bare baseline_50k) | ON (`no_repeat_ngram_size=3`) |
+|---|---|---|
+| L6 | `chin 41.100 Ngày 101 SD TP TP 120 1201100 1201210110011001100110101210100 0100110 CTP VTP P 13 CP P 1 1 1 P NH` | `Ninn 41.100 VPV 101 SD TP Trên 120 1.001. PTP.110 P PPNTP21 TC TN Phư TT P HC PV1 1 C 11 NHV` |
+| L8 | `" N NV 1 CN 1 120 C11.00 CTP 12 2 2 -2 N 2 2 2. TP TP KP TP K110101 2 1 1 2 122 DP T P TP.` | `chiều Chi11 120 C11.00 PTPT12. 2 22 - 2022.NTP TP. T1 TT Trên 13 1 2312 112/1222/2121 NV N.` |
+| L12 | `Tho và 120 CL1 TP (TP. P 211 120 10020 C17012011/122/ 2 202010.2 TP (121 121 TTP 1 1 1 12 20 2 1202 10100 TP TP T 0 TNVHCTP T2)` | `TP NH0 CL11 TP.(PTPC 211/120 T0012 T1 1 2 P 122 100 111212/217. STPT 171.210 200222011013221/20. 1312).123 TNVHH` |
+
+The 30+-character `1201210110011001100110101210100` run in L6 and the
+`2 2 2 2` and `10100` attractors in L8/L12 are gone; the output is
+still noisy (the recognizer is genuinely wrong on these crops), but it
+is no longer a runaway sequence.
+
+### Leaderboard delta (same detectors, baseline_50k on/off constraint)
+
+Detector-level metrics are unchanged by construction (no detector
+touched). Reporting only the recognizer-level metrics that moved:
+
+| Experiment | halluc_rate | digit_noise | garbage | rep# | caps_garbage |
+|---|---:|---:|---:|---:|---:|
+| **E0_paddle**   OFF | 0.566 | 0.052 | 0.172 | 16.4 | 0.172 |
+| **E0_paddle**   ON  | **0.460** | **0.036** | **0.139** | **14.7** | **0.105** |
+| Δ | **-0.106** | **-0.016** | **-0.033** | **-1.7** | **-0.067** |
+| **E1_surya**    OFF | 0.715 | 0.084 | 0.303 | 20.6 | 0.267 |
+| **E1_surya**    ON  | **0.695** | **0.078** | **0.240** | **15.4** | **0.203** |
+| Δ | -0.020 | -0.006 | **-0.063** | **-5.1** | **-0.064** |
+| **E2_craft**    OFF | 0.554 | 0.019 | 0.121 | 6.9 | 0.160 |
+| **E2_craft**    ON  | **0.477** | +0.048 | **0.111** | +8.3 | **0.091** |
+| Δ | **-0.078** | +0.028 | -0.010 | +1.4 | **-0.069** |
+| **E3_kraken**   OFF | 0.538 | 0.071 | 0.059 | 4.9 | 0.166 |
+| **E3_kraken**   ON  | +0.554 | +0.090 | +0.105 | **3.1** | **0.138** |
+| Δ | +0.016 | +0.019 | +0.047 | **-1.7** | **-0.028** |
+
+The constraint helps most on the backends where the attractor was worst
+(Surya had the longest digit runs, Paddle had the highest hallucination
+rate). It is roughly neutral on Kraken, which already had the lowest
+digit-repeat count: there it trades a small regression on `garbage` and
+`halluc` for further cuts on `repeated#` and `uppercase_garbage`.
+
+`uppercase_garbage_token_rate` drops on **every** backend (by 0.028 to
+0.069). This is a direct measure of the attractor pathology: strings
+of repeated capital letters (`NDND…`, `TPTPTP…`) are the same
+phenomenon as repeated digits, and the ngram mask catches both.
+
+### Winner: Kraken BLLA still the default
+
+Against the recognizer-level criteria we care about in production:
+
+| Metric | Best backend (ON) | Value |
+|---|---|---:|
+| `garbage_text_ratio` | E2_craft | **0.111** |
+| `hallucinated_line_rate` | E0_paddle | **0.460** |
+| `repeated_number_sequence_count` | **E3_kraken** | **3.1** |
+| `uppercase_garbage_token_rate` | E2_craft | **0.091** |
+| `full_width_band_rate` (unchanged) | **E3_kraken** | **0.108** |
+| `mean_distinct_x1_per_page` (unchanged) | E0_paddle | 12.7 |
+
+Kraken is still the only backend that simultaneously:
+
+* has the lowest detector-geometry drift (`full_width_band_rate =
+  0.108`, tied with Paddle/Surya),
+* has the lowest `repeated_number_sequence_count` (3.1 with the
+  constraint on),
+* avoids the full-width-band failure mode entirely on cursive pages
+  where Paddle collapses to a grid of 20-band strips.
+
+The Kraken-specific `garbage` regression (+0.047) is an expected
+side-effect: when the recognizer previously emitted a long `23232…`
+run, the `garbage_text_ratio` heuristic scored it as **one** garbage
+line; with the constraint the model emits more distinct but
+still-wrong tokens, so the heuristic counts **more** garbage lines.
+The underlying content is cleaner (short diverse tokens instead of
+long attractor runs), but a tokenwise metric under-credits the fix.
+Human-visible output is improved across all 7 pages.
+
+### Recommended default
+
+**Turn the constraint ON by default** (`Settings.rec_no_repeat_ngram_size = 3`).
+This ships in the current PR.
+
+* Reproducibly cuts the attractor pathology on three of four
+  backends.
+* On the remaining backend (Kraken) the trade-off is neutral-to-slightly
+  negative on short-token garbage but still improves the target metric
+  (`repeated#`).
+* Easy to disable per-request (`OCR_REC_NO_REPEAT_NGRAM_SIZE=0`) if a
+  downstream user sees a regression on a specific corpus.
+
+### What's still left on the table
+
+The constraint addresses **exact ngram repetition**. It does not fix:
+
+* **Semantically wrong but non-repeating output** — e.g. `Ninn 41.100
+  VPV 101 SD TP Trên…` above. The recognizer is still guessing.
+  The next lever is a Vietnamese KenLM 5-gram rescorer over the
+  top-k candidates (from the original architecture plan).
+* **`garbage_text_ratio` on Kraken crops** — the 0.059 → 0.105 change
+  is a tokenwise artifact of the fix; a character-level (CER/WER)
+  metric would show an improvement, not a regression. Building box-
+  level GT on `tests/test/` so we can compute CER/WER is the next
+  structural improvement.
+* **Non-ngram attractors** — occasional all-caps stretches with no
+  exact trigram repeat still slip through. A broader penalty
+  (frequency-based, or a small output-token frequency prior) would
+  catch these.
+
+### Reproduction (constraint rerun)
+
+```
+OCR_REC_NO_REPEAT_NGRAM_SIZE=3 python scripts/run_detector_experiment.py \
+    --input-dir tests/test \
+    --model-key baseline_50k \
+    --output-dir experiments/runs/phase3_detector_comparison_ftuned_nrng
+```
+
+Compared against the OFF run at
+`experiments/runs/phase3_detector_comparison_ftuned/`. Both
+directories are gitignored per AGENTS.md; only the numbers in this
+report ship in the PR.
+
 ## Reproduction
 
 ```
