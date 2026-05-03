@@ -477,23 +477,20 @@ class VietOCRRecognizer:
 
             for _ in range(max_seq_length):
                 # Feed the full prefix each step (memory is cached).
-                # Shape: [B, T]
+                # vietocr's forward_decoder expects the target tensor as
+                # [T, B] — see vietocr/tool/translate.py::translate
+                # (`torch.LongTensor(translated_sentence)` is built as a
+                # [T, B] tensor because `translated_sentence` is a list
+                # where each element contains the t-th token for every
+                # batch row). We mirror that shape exactly.
                 max_t = max(len(s) for s in token_seq)
                 padded = [s + [eos_token] * (max_t - len(s)) for s in token_seq]
-                tgt_inp = torch.LongTensor(padded).to(device).transpose(0, 1)  # [T, B]
-                # vietocr's forward_decoder expects [T, B]-style in some paths
-                # and [B, T] in others; use the same signature as the
-                # reference translate() implementation.
-                try:
-                    output, memory = model.transformer.forward_decoder(
-                        tgt_inp.transpose(0, 1), memory
-                    )
-                except Exception:
-                    output, memory = model.transformer.forward_decoder(
-                        tgt_inp, memory
-                    )
-                # output: [B, T, V] or [T, B, V] depending on version.
-                # Normalise so last time-step is dim=1.
+                # padded is [B, T] → transpose to [T, B].
+                tgt_inp = torch.LongTensor(padded).to(device).transpose(0, 1)
+                output, memory = model.transformer.forward_decoder(tgt_inp, memory)
+                # Both Seq2Seq and Transformer decoders return
+                # output shape [B, T, V] for this input. Take the last
+                # time-step per batch row.
                 if output.dim() == 3 and output.size(0) == batch_size:
                     last_logits = output[:, -1, :]
                 else:
