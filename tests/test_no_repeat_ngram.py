@@ -13,8 +13,6 @@ and fully covers the algorithmic correctness.
 
 from __future__ import annotations
 
-import pytest
-
 from ocr_pipeline.recognizer.vietocr_recognizer import (
     VietOCRRecognizer,
     _banned_next_tokens,
