@@ -440,6 +440,11 @@ class OCRPipeline:
                 image_min_width=model_cfg["image_min_width"],
                 device=settings.rec_device,
                 enable_local_contrast=config.enable_local_contrast,
+                no_repeat_ngram_size=(
+                    config.rec_no_repeat_ngram_size
+                    if config.rec_no_repeat_ngram_size is not None
+                    else settings.rec_no_repeat_ngram_size
+                ),
             ),
             reconstructor=LayoutReconstructor.from_settings(),
             refiner=LineRefiner(

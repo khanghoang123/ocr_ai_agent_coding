@@ -26,6 +26,32 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
+def _banned_next_tokens(prev_tokens: list[int], ngram_size: int) -> set[int]:
+    """Return the set of tokens that must NOT be emitted next because
+    doing so would reproduce an (ngram_size)-gram already seen earlier
+    in ``prev_tokens``.
+
+    For example with ngram_size=3 and prev_tokens = [1, 5, 0, 1, 0, 1],
+    the last two tokens are (0, 1). The prefix (0, 1) already appears at
+    positions (2, 3) and (4, 5); the token that followed it was 0 both
+    times, so emitting 0 again would reproduce the 3-gram (0, 1, 0).
+    We therefore ban {0} as the next token.
+    """
+    if ngram_size <= 1 or len(prev_tokens) < ngram_size:
+        return set()
+
+    seen: dict[tuple[int, ...], set[int]] = {}
+    # Walk every (ngram_size - 1)-prefix in prev_tokens and record the
+    # token that historically followed it.
+    for i in range(len(prev_tokens) - ngram_size + 1):
+        key = tuple(prev_tokens[i : i + ngram_size - 1])
+        next_tok = prev_tokens[i + ngram_size - 1]
+        seen.setdefault(key, set()).add(next_tok)
+
+    current_prefix = tuple(prev_tokens[-(ngram_size - 1) :])
+    return seen.get(current_prefix, set())
+
+
 @dataclass
 class RecognitionResult:
     text: str
@@ -222,6 +248,7 @@ class VietOCRRecognizer:
         image_min_width: int = 32,
         device: str = "cpu",
         enable_local_contrast: bool = True,
+        no_repeat_ngram_size: int = 0,
     ):
         self.weights_path = str(weights_path)
         self.architecture = architecture
@@ -229,6 +256,12 @@ class VietOCRRecognizer:
         self.image_max_width = image_max_width
         self.image_min_width = image_min_width
         self.device = device
+        # Seq2seq decoder no-repeat-ngram constraint. 0 disables the
+        # constraint (legacy vietocr path); >0 blocks any token that
+        # would complete an ngram of this size already emitted earlier
+        # in the same line. Used to suppress the repeating-digit
+        # attractor observed with fine-tuned checkpoints.
+        self.no_repeat_ngram_size = int(no_repeat_ngram_size or 0)
         self._preprocessor = RecognitionPreprocessor(
             target_height=image_height,
             enable_local_contrast=enable_local_contrast,
@@ -269,17 +302,28 @@ class VietOCRRecognizer:
         cfg["dataset"]["image_min_width"] = self.image_min_width
         predictor_cfg = cfg.setdefault("predictor", {})
         beam_enabled = isinstance(predictor_cfg, dict)
+        # The no-repeat-ngram constraint runs in our own greedy decode
+        # path — force beamsearch off when it is enabled.
         if beam_enabled:
-            predictor_cfg["beamsearch"] = True
+            predictor_cfg["beamsearch"] = (
+                False if self.no_repeat_ngram_size > 0 else True
+            )
         try:
             self._predictor = Predictor(cfg)
-            self._decode_mode = "beam" if beam_enabled else "greedy"
+            if self.no_repeat_ngram_size > 0:
+                self._decode_mode = f"greedy+no_repeat_ngram_{self.no_repeat_ngram_size}"
+            else:
+                self._decode_mode = "beam" if beam_enabled else "greedy"
         except Exception:
             if not beam_enabled:
                 raise
             predictor_cfg["beamsearch"] = False
             self._predictor = Predictor(cfg)
-            self._decode_mode = "greedy"
+            self._decode_mode = (
+                f"greedy+no_repeat_ngram_{self.no_repeat_ngram_size}"
+                if self.no_repeat_ngram_size > 0
+                else "greedy"
+            )
         logger.info("VietOCR model loaded successfully.")
 
     @staticmethod
@@ -384,10 +428,117 @@ class VietOCRRecognizer:
                 )
         return results
 
+    def _predict_no_repeat_ngram(
+        self,
+        image: Image.Image,
+        max_seq_length: int = 128,
+        sos_token: int = 1,
+        eos_token: int = 2,
+    ) -> tuple[str, float]:
+        """Greedy seq2seq decode with a no-repeat-ngram constraint.
+
+        At each decoder step we take the top-K logits over the vocab,
+        then mask out any token that would cause the last
+        ``no_repeat_ngram_size`` tokens to match an ngram already
+        emitted earlier in the same line. This suppresses the
+        repeating-digit attractor ("0101010...", "232323...", "NDND...")
+        that fine-tuned ``baseline_50k`` produces on slanted
+        handwriting crops.
+
+        The math and data flow mirror ``vietocr.tool.translate.translate``
+        so that token ids are compatible with ``self._predictor.vocab``.
+        """
+        import torch
+        from torch.nn.functional import softmax
+        from vietocr.tool.translate import process_input
+
+        model = self._predictor.model
+        vocab = self._predictor.vocab
+        device = self._predictor.device
+
+        img = process_input(
+            image,
+            self.image_height,
+            self.image_min_width,
+            self.image_max_width,
+        ).to(device)
+
+        n = int(self.no_repeat_ngram_size)
+        model.eval()
+        with torch.no_grad():
+            src = model.cnn(img)
+            memory = model.transformer.forward_encoder(src)
+
+            batch_size = img.size(0)
+            # token_seq[b] = list of token ids decoded so far for row b
+            token_seq: list[list[int]] = [[sos_token] for _ in range(batch_size)]
+            prob_seq: list[list[float]] = [[1.0] for _ in range(batch_size)]
+            finished = [False] * batch_size
+
+            for _ in range(max_seq_length):
+                # Feed the full prefix each step (memory is cached).
+                # Shape: [B, T]
+                max_t = max(len(s) for s in token_seq)
+                padded = [s + [eos_token] * (max_t - len(s)) for s in token_seq]
+                tgt_inp = torch.LongTensor(padded).to(device).transpose(0, 1)  # [T, B]
+                # vietocr's forward_decoder expects [T, B]-style in some paths
+                # and [B, T] in others; use the same signature as the
+                # reference translate() implementation.
+                try:
+                    output, memory = model.transformer.forward_decoder(
+                        tgt_inp.transpose(0, 1), memory
+                    )
+                except Exception:
+                    output, memory = model.transformer.forward_decoder(
+                        tgt_inp, memory
+                    )
+                # output: [B, T, V] or [T, B, V] depending on version.
+                # Normalise so last time-step is dim=1.
+                if output.dim() == 3 and output.size(0) == batch_size:
+                    last_logits = output[:, -1, :]
+                else:
+                    last_logits = output[-1, :, :]
+                last_probs = softmax(last_logits, dim=-1).to("cpu")
+
+                # Mask ngram-repeats per batch row.
+                if n > 0:
+                    for b in range(batch_size):
+                        if finished[b]:
+                            continue
+                        banned = _banned_next_tokens(token_seq[b], n)
+                        if banned:
+                            last_probs[b, list(banned)] = 0.0
+
+                # Greedy pick.
+                values, indices = torch.topk(last_probs, 1, dim=-1)
+                indices = indices[:, 0].tolist()
+                values = values[:, 0].tolist()
+
+                for b in range(batch_size):
+                    if finished[b]:
+                        continue
+                    token_seq[b].append(int(indices[b]))
+                    prob_seq[b].append(float(values[b]))
+                    if int(indices[b]) == eos_token:
+                        finished[b] = True
+
+                if all(finished):
+                    break
+
+            # batch_size is 1 in our wrapper path.
+            tokens = token_seq[0]
+            probs = prob_seq[0]
+            text = vocab.decode(tokens)
+            valid = [p for p, t in zip(probs, tokens) if t > 3]
+            confidence = float(sum(valid) / len(valid)) if valid else 0.0
+            return str(text), confidence
+
     def _predict_with_optional_probability(
         self,
         image: Image.Image,
     ) -> tuple[str, float]:
+        if self.no_repeat_ngram_size > 0:
+            return self._predict_no_repeat_ngram(image)
         prediction = self._predictor.predict(image, return_prob=True)
         if isinstance(prediction, tuple):
             text = prediction[0] if len(prediction) > 0 else ""
@@ -437,4 +588,5 @@ class VietOCRRecognizer:
             image_max_width=model_cfg["image_max_width"],
             image_min_width=model_cfg["image_min_width"],
             device=settings.rec_device,
+            no_repeat_ngram_size=settings.rec_no_repeat_ngram_size,
         )
