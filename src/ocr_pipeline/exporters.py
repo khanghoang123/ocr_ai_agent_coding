@@ -121,15 +121,22 @@ def _to_json(result: OCRResult) -> str:
 
 def _to_pdf(result: OCRResult, images: Optional[list[Image.Image]] = None) -> bytes:
     """Generate a Searchable PDF where text is overlayed on the original image.
-    
+
     If images are provided, they are drawn as background.
     Each page in OCRResult is transformed into a PDF page.
     """
     import io
-    from reportlab.pdfgen import canvas
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.utils import ImageReader
+
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.lib.utils import ImageReader
+    except ImportError as exc:  # pragma: no cover - env-dependent
+        raise RuntimeError(
+            "PDF export requires the 'reportlab' package. Install it via "
+            "`pip install reportlab` (already listed in requirements.txt)."
+        ) from exc
 
     # Register Vietnamese-compatible font
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"

@@ -346,6 +346,22 @@ class LineRefiner:
         entries: list[_PageEntry],
         page_median_height: float,
     ) -> list[_PageEntry]:
+        """Merge near-duplicate bands without runaway cascading.
+
+        The previous implementation merged any pair with ``overlap_ratio
+        >= 0.35`` or strongly-negative ``gap`` regardless of how tall the
+        resulting band would be. For detectors that emit ascender- and
+        descender-rich polygons (Kraken BLLA, Surya), neighbouring real
+        lines routinely overlap by 30-40% of their bbox height; the
+        merge then produced a taller band that overlapped the next
+        polygon even more, cascading until every line on the page
+        collapsed into a single band. The fix gates *every* merge path
+        on a ``combined_height`` upper bound tied to
+        ``page_median_height``: a merge is only allowed when the
+        resulting band stays within the height envelope of a single
+        line. Tall genuine multi-line bands are still split downstream
+        by ``_split_tall_entry``.
+        """
         out: list[_PageEntry] = []
         for entry in sorted(entries, key=lambda item: item.center_y):
             if not out:
@@ -353,16 +369,28 @@ class LineRefiner:
                 continue
             previous = out[-1]
             gap = entry.bbox[1] - previous.bbox[3]
-            overlap = max(0.0, min(previous.bbox[3], entry.bbox[3]) - max(previous.bbox[1], entry.bbox[1]))
+            overlap = max(
+                0.0,
+                min(previous.bbox[3], entry.bbox[3])
+                - max(previous.bbox[1], entry.bbox[1]),
+            )
             min_height = max(min(previous.height, entry.height), 1.0)
-            combined_height = max(previous.bbox[3], entry.bbox[3]) - min(previous.bbox[1], entry.bbox[1])
+            combined_height = max(previous.bbox[3], entry.bbox[3]) - min(
+                previous.bbox[1], entry.bbox[1]
+            )
             overlap_ratio = overlap / min_height
+            height_envelope = page_median_height * 1.45
+            within_envelope = combined_height <= height_envelope
+            high_overlap_dup = overlap_ratio >= 0.6 and within_envelope
+            heavy_negative_gap = (
+                gap < -page_median_height * 0.15 and within_envelope
+            )
             too_close_duplicate = (
                 gap >= 0
                 and gap <= max(2.0, page_median_height * 0.08)
-                and combined_height <= page_median_height * 1.45
+                and within_envelope
             )
-            if overlap_ratio >= 0.35 or gap < -page_median_height * 0.15 or too_close_duplicate:
+            if high_overlap_dup or heavy_negative_gap or too_close_duplicate:
                 out[-1] = self._merge_entries(previous, entry)
             else:
                 out.append(entry)
