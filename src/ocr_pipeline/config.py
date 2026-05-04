@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     # candidates per line, and picks the best by::
     #
     #     score = gamma * acoustic_logprob
-    #           + alpha * lm_logprob
+    #           + alpha * (lm_logprob / max(1, word_count))
     #           + beta  * word_count
     #
     # When the file is missing or kenlm is not installed, the

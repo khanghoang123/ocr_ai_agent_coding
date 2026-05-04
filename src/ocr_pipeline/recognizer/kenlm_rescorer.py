@@ -10,10 +10,13 @@ attractor but does not help these local mistakes.
 This module runs a shallow beam over the recognizer's own decoder and
 picks the candidate that maximises::
 
-    score(candidate) = acoustic_logprob + alpha * lm_logprob
-                       + beta * word_count(candidate)
+    score(candidate) = gamma * acoustic_logprob
+                     + alpha * (lm_logprob / max(1, word_count))
+                     + beta  * word_count
 
-following the classic Bahdanau / Mozilla DeepSpeech scoring rule.
+following the classic Bahdanau / Mozilla DeepSpeech scoring rule with
+a per-word LM normalisation so longer fluent candidates are not
+penalised purely for length.
 
 The rescorer is loaded **lazily** and is a no-op whenever the KenLM
 ``.bin`` (or ``.arpa``) file referenced by ``model_path`` does not
@@ -179,8 +182,14 @@ class KenLMRescorer:
         The scoring rule is::
 
             score = gamma * acoustic_logprob
-                  + alpha * lm_logprob
+                  + alpha * (lm_logprob / max(1, word_count))
                   + beta  * word_count
+
+        ``lm_logprob`` is length-normalised by word count so longer
+        fluent candidates are not penalised just for accumulating more
+        per-word log-probabilities. The unnormalised ``word_count`` bonus
+        (``beta``) is applied separately so callers can independently
+        tune how strongly the rescorer prefers longer outputs.
 
         Ties are broken by the input order (stable). If the rescorer
         is disabled (no LM, no kenlm, bad file), we return the first
