@@ -1,0 +1,32 @@
+{
+  "image": "soan-bai-tap-doc-thuan-phuc-su-tu-trang-117-sgk-tieng-viet-lop-5-tap-2-soan-tieng-viet-lop-5-2.jpg",
+  "ground_truth_quality": "verified",
+  "notes": "Clean printed Vietnamese textbook page (Tieng Viet lop 5, tap 2 - 'Thuan phuc su tu'). Transcribed character-for-character. Watermark text 'inlnenpli.' bleeds in along the right edge but is not part of the article body and is excluded from GT lines.",
+  "lines": [
+    {"text": "*Gợi ý: Các em có thể tham khảo cách kể chuyện như sau:"},
+    {"text": "Tôi đã lấy chồng được hai năm. Trước khi cưới, chồng tôi là một người dễ mến,"},
+    {"text": "lúc nào cũng tươi vui vẻ. Vậy mà hiện tại, lúc nào anh ta cũng cau có, hay gắt"},
+    {"text": "gỏng. Tôi rất buồn, đành phải tìm đến vị giáo sĩ già trong vùng nhờ giúp đỡ."},
+    {"text": "Vị giáo sĩ râu tóc bạc phơ nhìn vào mắt tôi hồi lâu rồi bảo: \"Nếu con đem được ba"},
+    {"text": "sợi lông bờm của một con sư tử sống về đây, ta sẽ nói cho con biết bí quyết.\" Nghe"},
+    {"text": "giáo sĩ nói vậy, tôi sợ toát mồ hôi, trên đường về vừa đi vừa khóc vì yêu cầu này"},
+    {"text": "làm sao mà thực hiện được đây, xưa nay đến gần sư tử đã khó, lấy được sợi lông"},
+    {"text": "bờm của nó chỉ có đường bỏ mạng. Nhưng khát khao về gia đình hạnh phúc đã"},
+    {"text": "giúp tôi tìm ra cách làm thân với sư tử: cứ tối đến tôi mang một con cừu tươi non"},
+    {"text": "đến chỗ sư tử, khi nó gào lên và chuẩn bị nhảy bổ tới, tôi liền vứt con cừu cho sư"},
+    {"text": "tử ăn."},
+    {"text": "Tối nào cũng được ăn một con cừu ngon lành, sư tử dần dần đổi tính, nó trở nên"},
+    {"text": "gần gũi với tôi hơn, có hôm tôi còn cả gan ngồi ngắm nằm im cho nó chải bộ lông bờm sau gáy"},
+    {"text": "của nó. Một lần, sau khi sư tử đã ăn no nê và nằm bên chân tôi, tôi liền thầm cầu"},
+    {"text": "nguyện thánh A-la chở che và lén nhổ ba sợi lông bờm của nó. Con vật giật mình,"},
+    {"text": "chồm dậy quay về phía tôi. Nhưng tôi nhìn nó với ánh mắt dịu dàng, bởi vậy nó"},
+    {"text": "cụp mắt rồi lẳng lặng bỏ đi."},
+    {"text": "Tôi thở phào nhẹ nhõm và đã hoàn thành xong điều kiện vị giáo sĩ đưa ra và vội"},
+    {"text": "vàng đến ngay nhà ông. Nhìn thấy tôi mang ba sợi lông sư tử đến, vị giáo sư liền"},
+    {"text": "mỉm cười và bảo tôi rằng: \"Chỉ trong ít ngày, bằng trí thông minh, sự kiên nhẫn và"},
+    {"text": "tính nết dịu dàng, con đã thuần phục được con sư tử hung dữ. Chẳng lẽ con không"},
+    {"text": "làm mềm lòng nổi một người đàn ông vốn yếu đuối hơn con sư tử rất nhiều? Con"},
+    {"text": "đã nắm được bí quyết rồi đấy?\""},
+    {"text": "Tôi hiểu được ý của vị giáo sĩ già nên đã vui vẻ, thong thả bước về nhà."}
+  ]
+}
