@@ -126,6 +126,17 @@ class Settings(BaseSettings):
     # (line-height) axes so the recogniser sees the full glyphs.
     cropper_polygon_pad_v_ratio: float = 0.22
     cropper_polygon_pad_h_ratio: float = 0.04
+    # Replace pixels outside the detected polygon with the paper colour
+    # before warping so neighbour-line bleed-in does not contaminate the
+    # recogniser's input. Set to ``False`` to preserve raw pixels.
+    cropper_mask_polygon_background: bool = True
+    cropper_mask_dilation_px: int = 3
+    # Prefer an axis-aligned slice over a perspective warp for polygons
+    # whose principal angle is within ``cropper_horizontal_angle_tolerance_deg``
+    # of horizontal. Avoids the sub-pixel edge curl introduced by
+    # ``cv2.warpPerspective`` on near-horizontal text.
+    cropper_prefer_axis_aligned_for_horizontal: bool = True
+    cropper_horizontal_angle_tolerance_deg: float = 4.0
 
     # ── FastAPI settings ─────────────────────────────────────
     api_host: str = "0.0.0.0"

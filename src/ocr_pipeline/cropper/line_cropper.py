@@ -68,6 +68,11 @@ class LineCropper:
         max_deskew_angle: float = 8.0,
         polygon_pad_v_ratio: float = 0.22,
         polygon_pad_h_ratio: float = 0.04,
+        mask_polygon_background: bool = True,
+        mask_background_color: tuple[int, int, int] | None = None,
+        mask_dilation_px: int = 3,
+        prefer_axis_aligned_for_horizontal: bool = True,
+        horizontal_angle_tolerance_deg: float = 4.0,
     ):
         self.min_height = min_height
         self.min_width = min_width
@@ -94,6 +99,25 @@ class LineCropper:
         # path and via ``_crop_axis_aligned`` for the axis-aligned path.
         self.polygon_pad_v_ratio = max(0.0, float(polygon_pad_v_ratio))
         self.polygon_pad_h_ratio = max(0.0, float(polygon_pad_h_ratio))
+        # Polygon background masking: replace pixels OUTSIDE the
+        # detected polygon (but inside the warp source quad) with a
+        # uniform "paper" colour so neighbour lines do not bleed into
+        # the recogniser's input. When ``mask_background_color`` is
+        # ``None`` the colour is sampled from the polygon interior at
+        # the per-line median brightness, which keeps the crop close
+        # to the page's actual paper tone.
+        self.mask_polygon_background = bool(mask_polygon_background)
+        self.mask_background_color = mask_background_color
+        self.mask_dilation_px = max(0, int(mask_dilation_px))
+        # Routing heuristic: when the polygon's principal orientation
+        # is within ``horizontal_angle_tolerance_deg`` of horizontal,
+        # prefer an axis-aligned crop over the perspective warp from
+        # ``minAreaRect``. The latter introduces sub-pixel edge curl
+        # on near-horizontal lines (visible as bent left/right ends
+        # on text that is, in fact, straight) — see the user-reported
+        # "Nam Cao" sample for an example.
+        self.prefer_axis_aligned_for_horizontal = bool(prefer_axis_aligned_for_horizontal)
+        self.horizontal_angle_tolerance_deg = float(horizontal_angle_tolerance_deg)
         self.page_median_line_height: float | None = None
 
     def crop_all(
@@ -130,6 +154,87 @@ class LineCropper:
         logger.debug("Cropped %d/%d valid lines.", len(results), len(polygons))
         return results
 
+    def _estimate_paper_color(
+        self, img_np: np.ndarray, poly: np.ndarray
+    ) -> np.ndarray:
+        """Estimate the paper colour around a polygon.
+
+        Uses the 80th-percentile brightness of pixels inside the polygon's
+        axis-aligned bbox: text strokes are dark, paper is bright, so
+        the high-percentile pixel is a robust paper-tone estimate.
+        Falls back to a near-white default when the bbox is empty.
+        """
+        if self.mask_background_color is not None:
+            return np.array(self.mask_background_color, dtype=np.uint8)
+        h, w = img_np.shape[:2]
+        xs = poly[:, 0]
+        ys = poly[:, 1]
+        x0 = max(0, int(np.floor(np.min(xs))))
+        y0 = max(0, int(np.floor(np.min(ys))))
+        x1 = min(w, int(np.ceil(np.max(xs))))
+        y1 = min(h, int(np.ceil(np.max(ys))))
+        if x1 <= x0 or y1 <= y0:
+            return np.array([240, 240, 240], dtype=np.uint8)
+        patch = img_np[y0:y1, x0:x1]
+        if patch.ndim == 2:
+            patch = patch[..., None]
+        # 80th percentile per-channel: brighter than the bulk of
+        # background and far above text strokes.
+        per_channel = np.percentile(patch.reshape(-1, patch.shape[2]), 80, axis=0)
+        return per_channel.astype(np.uint8)
+
+    def _mask_outside_polygon(
+        self,
+        img_np: np.ndarray,
+        poly: np.ndarray,
+        paper_color: np.ndarray,
+    ) -> np.ndarray:
+        """Replace pixels outside ``poly`` with ``paper_color``.
+
+        The polygon is dilated by ``mask_dilation_px`` so a thin halo of
+        original pixels is preserved at the boundary, keeping the
+        polygon edge visually smooth instead of producing a hard rect
+        cutout that the recogniser interprets as a vertical bar.
+        """
+        h, w = img_np.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [poly.astype(np.int32)], 255)
+        if self.mask_dilation_px > 0:
+            k = self.mask_dilation_px
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))
+            mask = cv2.dilate(mask, kernel)
+        out = img_np.copy()
+        # Broadcast paper_color over channels.
+        if out.ndim == 3:
+            bg = np.broadcast_to(paper_color.reshape(1, 1, -1), out.shape).copy()
+        else:
+            bg = np.full_like(out, int(paper_color.mean()))
+        out = np.where(mask[..., None] > 0, out, bg) if out.ndim == 3 else np.where(mask > 0, out, bg)
+        return out.astype(np.uint8)
+
+    @staticmethod
+    def _polygon_principal_angle_deg(poly: np.ndarray) -> float:
+        """Return the polygon's principal orientation in degrees.
+
+        Uses ``cv2.minAreaRect`` to estimate the line angle, then
+        normalises it into ``(-45, 45]`` so that horizontal lines map
+        to angles close to 0.
+        """
+        rect = cv2.minAreaRect(poly.astype(np.float32))
+        angle = float(rect[-1])
+        # OpenCV reports angle in (-90, 0]. The width may be along the
+        # short or long side depending on point order, so we have to
+        # remap the angle to be relative to the long side.
+        (w, h) = rect[1]
+        if w < h:
+            angle += 90.0
+        # Wrap to (-45, 45]
+        while angle > 45.0:
+            angle -= 90.0
+        while angle <= -45.0:
+            angle += 90.0
+        return angle
+
     def warp_polygon(
         self,
         image: Image.Image,
@@ -153,15 +258,27 @@ class LineCropper:
         pad_v = self.polygon_pad_v_ratio
         pad_h = self.polygon_pad_h_ratio
 
+        # Mask pixels outside the detected polygon BEFORE the warp so
+        # that neighbour-line bleed-in does not contaminate the
+        # recogniser's input. The masked image is only used as the
+        # warp source — we never overwrite the original ``image``.
+        if self.mask_polygon_background and len(poly) >= 3:
+            paper = self._estimate_paper_color(img_np, poly)
+            warp_src = self._mask_outside_polygon(img_np, poly, paper)
+        else:
+            warp_src = img_np
+
         crop_to_page = None
         page_to_crop = None
         if len(poly) == 4 and self.enable_rotated_crop:
-            quad = self._crop_quad(img_np, poly, img_h, img_w, pad_v, pad_h)
+            quad = self._crop_quad(warp_src, poly, img_h, img_w, pad_v, pad_h)
             if quad is None:
                 return None
             crop, crop_to_page, page_to_crop = quad
         elif len(poly) == 4:
-            crop = self._crop_axis_aligned(img_np, poly, img_h, img_w, pad_v, pad_h)
+            crop = self._crop_axis_aligned(
+                warp_src, poly, img_h, img_w, pad_v, pad_h
+            )
             if crop is None:
                 return None
         else:
@@ -175,18 +292,37 @@ class LineCropper:
             # image, producing visibly distorted crops; route them
             # straight to the minAreaRect path.
             if kind == "index" and curve_score > 0.05:
-                crop = self._crop_unwarp(img_np, poly, img_h, img_w)
+                crop = self._crop_unwarp(warp_src, poly, img_h, img_w)
             if crop is None:
-                rect = cv2.minAreaRect(poly)
-                box = cv2.boxPoints(rect)
-                if self.enable_rotated_crop:
-                    quad = self._crop_quad(img_np, box, img_h, img_w, pad_v, pad_h)
-                    if quad is not None:
-                        crop, crop_to_page, page_to_crop = quad
-                else:
+                # Decide between an axis-aligned slice and a perspective
+                # warp from ``minAreaRect``. Axis-aligned avoids the
+                # sub-pixel edge curl that ``warpPerspective`` introduces
+                # on near-horizontal lines, so we route every polygon
+                # whose principal angle is within tolerance through it.
+                # The original ``minAreaRect`` path stays as a fallback
+                # for genuinely tilted lines.
+                angle = self._polygon_principal_angle_deg(poly)
+                use_axis_aligned = (
+                    self.prefer_axis_aligned_for_horizontal
+                    and abs(angle) <= self.horizontal_angle_tolerance_deg
+                )
+                if use_axis_aligned:
                     crop = self._crop_axis_aligned(
-                        img_np, box, img_h, img_w, pad_v, pad_h
+                        warp_src, poly, img_h, img_w, pad_v, pad_h
                     )
+                if crop is None:
+                    rect = cv2.minAreaRect(poly)
+                    box = cv2.boxPoints(rect)
+                    if self.enable_rotated_crop:
+                        quad = self._crop_quad(
+                            warp_src, box, img_h, img_w, pad_v, pad_h
+                        )
+                        if quad is not None:
+                            crop, crop_to_page, page_to_crop = quad
+                    else:
+                        crop = self._crop_axis_aligned(
+                            warp_src, box, img_h, img_w, pad_v, pad_h
+                        )
 
         if crop is None:
             return None
@@ -738,4 +874,8 @@ class LineCropper:
             padding=settings.crop_padding,
             polygon_pad_v_ratio=settings.cropper_polygon_pad_v_ratio,
             polygon_pad_h_ratio=settings.cropper_polygon_pad_h_ratio,
+            mask_polygon_background=settings.cropper_mask_polygon_background,
+            mask_dilation_px=settings.cropper_mask_dilation_px,
+            prefer_axis_aligned_for_horizontal=settings.cropper_prefer_axis_aligned_for_horizontal,
+            horizontal_angle_tolerance_deg=settings.cropper_horizontal_angle_tolerance_deg,
         )
