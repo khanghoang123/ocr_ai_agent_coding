@@ -461,7 +461,7 @@ class VietOCRRecognizer:
         max_seq_length: int = 128,
         sos_token: int = 1,
         eos_token: int = 2,
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, float]:
         """Greedy seq2seq decode with a no-repeat-ngram constraint.
 
         At each decoder step we take the top-K logits over the vocab,
@@ -474,7 +474,20 @@ class VietOCRRecognizer:
 
         The math and data flow mirror ``vietocr.tool.translate.translate``
         so that token ids are compatible with ``self._predictor.vocab``.
+
+        Returns ``(text, confidence, avg_logprob)`` where:
+        * ``confidence`` is ``mean(p_i)`` over non-special tokens — the
+          legacy per-step probability used by the API.
+        * ``avg_logprob`` is ``mean(log(p_i))`` over the same tokens —
+          commensurate with the per-token average log-prob returned by
+          ``_predict_beam_no_repeat_ngram``. Combining greedy and beam
+          candidates in the rescorer requires both scores live in the
+          same space; ``log(mean(p))`` would be biased upward for
+          greedy by Jensen's inequality and would systematically beat
+          beam alternatives at the rescoring step.
         """
+        import math
+
         import torch
         from torch.nn.functional import softmax
         from vietocr.tool.translate import process_input
@@ -555,7 +568,13 @@ class VietOCRRecognizer:
             text = vocab.decode(tokens)
             valid = [p for p, t in zip(probs, tokens) if t > 3]
             confidence = float(sum(valid) / len(valid)) if valid else 0.0
-            return str(text), confidence
+            if valid:
+                avg_logprob = float(
+                    sum(math.log(max(p, 1e-30)) for p in valid) / len(valid)
+                )
+            else:
+                avg_logprob = 0.0
+            return str(text), confidence, avg_logprob
 
     def _predict_beam_no_repeat_ngram(
         self,
@@ -860,30 +879,23 @@ class VietOCRRecognizer:
             # Always include the greedy prediction as a candidate so
             # rescoring can never do worse than the legacy path.
             #
-            # The greedy path returns a per-step mean probability
-            # (confidence). Converting that to a natural-log per-token
-            # score (``log(max(conf, eps))``) makes the greedy
-            # candidate's acoustic score commensurate with the
-            # beam candidates (which also carry a per-token average
-            # logprob — see ``_predict_beam_no_repeat_ngram``).
-            import math
-
+            # The greedy path's acoustic score is the **per-token mean
+            # log-prob** (``mean(log(p_i))``), matching what
+            # ``_predict_beam_no_repeat_ngram`` returns for beam
+            # candidates. Using ``log(mean(p_i))`` here would be biased
+            # upward by Jensen's inequality and would systematically
+            # beat any beam alternative regardless of its LM score.
             candidates: list[Candidate] = []
             seen_texts: set[str] = set()
-            if self.no_repeat_ngram_size > 0:
-                greedy_text, greedy_conf = self._predict_no_repeat_ngram(image)
-            else:
-                prediction = self._predictor.predict(image, return_prob=True)
-                if isinstance(prediction, tuple):
-                    greedy_text = prediction[0] or ""
-                    greedy_conf = (
-                        float(prediction[1]) if len(prediction) > 1 else 0.0
-                    )
-                else:
-                    greedy_text = prediction or ""
-                    greedy_conf = 0.0
+            # ``_predict_no_repeat_ngram`` is the same greedy decoder
+            # whether or not the ngram mask is active (``n=0`` skips
+            # masking). Call it unconditionally so the per-token
+            # ``mean(log(p))`` we get back is computed identically for
+            # the rescorer, regardless of the ngram setting.
+            greedy_text, _greedy_conf, greedy_acoustic = (
+                self._predict_no_repeat_ngram(image)
+            )
             greedy_text = str(greedy_text)
-            greedy_acoustic = math.log(max(float(greedy_conf), 1e-30))
             if greedy_text and greedy_text not in seen_texts:
                 candidates.append(
                     Candidate(
@@ -899,7 +911,7 @@ class VietOCRRecognizer:
                 seen_texts.add(t)
             return candidates
         if self.no_repeat_ngram_size > 0:
-            text, _conf = self._predict_no_repeat_ngram(image)
+            text, _conf, _avg_lp = self._predict_no_repeat_ngram(image)
             return [Candidate(text=text, acoustic_logprob=0.0)]
         # Legacy vietocr path — text only.
         prediction = self._predictor.predict(image, return_prob=True)
@@ -927,7 +939,8 @@ class VietOCRRecognizer:
             return result.text, 0.0
 
         if self.no_repeat_ngram_size > 0:
-            return self._predict_no_repeat_ngram(image)
+            text, conf, _avg_lp = self._predict_no_repeat_ngram(image)
+            return text, conf
         prediction = self._predictor.predict(image, return_prob=True)
         if isinstance(prediction, tuple):
             text = prediction[0] if len(prediction) > 0 else ""
