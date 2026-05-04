@@ -18,3 +18,10 @@ python-multipart>=0.0.9
 
 streamlit>=1.32.0
 requests>=2.31.0
+
+# PDF export uses reportlab; the white-bg PDF export tests exercise
+# the full export pipeline so reportlab needs to be available in CI.
+reportlab>=4.0.0
+# pymupdf (imported as ``fitz``) is used by the PDF tests to inspect
+# the rendered output (page rect, embedded image presence, text layer).
+pymupdf>=1.23.0

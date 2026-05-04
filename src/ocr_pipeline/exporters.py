@@ -119,11 +119,24 @@ def _to_json(result: OCRResult) -> str:
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
-def _to_pdf(result: OCRResult, images: Optional[list[Image.Image]] = None) -> bytes:
-    """Generate a Searchable PDF where text is overlayed on the original image.
+def _to_pdf(
+    result: OCRResult, images: Optional[list[Image.Image]] = None
+) -> bytes:
+    """Render the recognised text onto a clean white-background PDF.
 
-    If images are provided, they are drawn as background.
-    Each page in OCRResult is transformed into a PDF page.
+    The output PDF mirrors the input image's geometry — page size in
+    points equals the input image's pixel dimensions, and each line is
+    rendered at its detected bounding-box position with a font size
+    scaled so the text fills the bbox horizontally (with a hard cap
+    at the bbox height to preserve vertical layout).
+
+    Crucially, the source image is **not** drawn as background: the
+    user-facing PDF must be a clean black-text-on-white-paper render
+    so it is usable as a structured transcription of the input.
+
+    The ``images`` argument is kept for backward compatibility with
+    callers that still pass it; we only read each image's size as a
+    fallback when ``page.width`` / ``page.height`` are missing.
     """
     import io
 
@@ -131,14 +144,12 @@ def _to_pdf(result: OCRResult, images: Optional[list[Image.Image]] = None) -> by
         from reportlab.pdfgen import canvas
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.lib.utils import ImageReader
     except ImportError as exc:  # pragma: no cover - env-dependent
         raise RuntimeError(
             "PDF export requires the 'reportlab' package. Install it via "
             "`pip install reportlab` (already listed in requirements.txt)."
         ) from exc
 
-    # Register Vietnamese-compatible font
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     font_name = "DejaVuSans"
     pdfmetrics.registerFont(TTFont(font_name, font_path))
@@ -147,31 +158,46 @@ def _to_pdf(result: OCRResult, images: Optional[list[Image.Image]] = None) -> by
     c = canvas.Canvas(buf)
 
     for i, page in enumerate(result.pages):
-        w, h = page.width, page.height
+        w = float(page.width or 0)
+        h = float(page.height or 0)
+        if (w <= 0 or h <= 0) and images and i < len(images):
+            w, h = float(images[i].width), float(images[i].height)
+        if w <= 0 or h <= 0:
+            # Defensive fallback: A4 portrait at 72 dpi.
+            w, h = 595.0, 842.0
+
         c.setPageSize((w, h))
+        # Explicit white background — reportlab pages are nominally
+        # transparent, but some PDF viewers render that as black.
+        c.setFillColorRGB(1.0, 1.0, 1.0)
+        c.rect(0, 0, w, h, fill=1, stroke=0)
+        c.setFillColorRGB(0.0, 0.0, 0.0)
 
-        # 1. Draw background image if available
-        if images and i < len(images):
-            img_buf = io.BytesIO()
-            images[i].save(img_buf, format="JPEG", quality=85)
-            img_buf.seek(0)
-            c.drawImage(ImageReader(img_buf), 0, 0, width=w, height=h)
-
-        # 2. Draw text layer
-        # For a "Searchable PDF", text should match the position of input
-        # Note: ReportLab origin is bottom-left, while our OCR is top-left.
         for line in page.lines:
             bbox = line.bbox
-            text = line.text
-            
-            # Calculate height for font scaling
-            fh = max(8, bbox.height * 0.8)
-            c.setFont(font_name, fh)
-            
-            # Position: y_pdf = h - y_ocr (approx)
-            # We use x1, y2 (bottom left of the text line in OCR space)
-            # which maps to (x1, h - y2) in ReportLab space.
-            c.drawString(bbox.x1, h - bbox.y2 + 2, text)
+            text = (line.text or "").strip()
+            if not text:
+                continue
+            # Vertical: cap font size at 90 % of the bbox height so
+            # ascenders/descenders fit cleanly within the line slot.
+            target_h = max(6.0, float(bbox.height) * 0.9)
+            font_size = target_h
+            # Horizontal: shrink the font size further if the text is
+            # wider than the bbox. This keeps each line within its
+            # detected horizontal slot, mirroring the input layout.
+            target_w = max(1.0, float(bbox.width))
+            text_w_at_target = pdfmetrics.stringWidth(text, font_name, font_size)
+            if text_w_at_target > target_w:
+                font_size *= target_w / text_w_at_target
+            font_size = max(4.0, font_size)
+            c.setFont(font_name, font_size)
+            # ReportLab origin is bottom-left; OCR bboxes are top-left.
+            # Place the text baseline near the bbox's bottom edge,
+            # offset upwards by ~20 % of the font size so the visible
+            # glyph body sits inside the bbox.
+            x = float(bbox.x1)
+            y = h - float(bbox.y2) + font_size * 0.2
+            c.drawString(x, y, text)
 
         c.showPage()
 

@@ -476,3 +476,76 @@ class TestOutputValidation:
         data = json.loads(content_bytes.decode("utf-8"))
         assert data["total_pages"] == 3
         assert len(data["pages"]) == 3
+
+    # ── PDF export (white background, black text) ────────────────────────────
+
+    def test_pdf_export_returns_pdf_bytes(self):
+        """PDF export must return a non-empty bytes payload starting with %PDF."""
+        pytest.importorskip("reportlab")
+        content_bytes, mime = export_result(self.ocr_result, ExportFormat.PDF)
+        assert mime == "application/pdf"
+        assert content_bytes.startswith(b"%PDF"), "missing PDF magic bytes"
+        # 1-page PDF with text only is small but never empty.
+        assert len(content_bytes) > 500
+
+    def test_pdf_page_size_matches_input_page_dimensions(self):
+        """PDF page size (in points) must equal the input image dimensions."""
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
+        content_bytes, _ = export_result(self.ocr_result, ExportFormat.PDF)
+        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        page = doc[0]
+        assert int(round(page.rect.width)) == self.ocr_result.pages[0].width
+        assert int(round(page.rect.height)) == self.ocr_result.pages[0].height
+        doc.close()
+
+    def test_pdf_does_not_embed_source_image(self):
+        """PDF export must NOT include the original image as background.
+
+        The user-facing PDF should be a clean transcription on white
+        paper. Embedding the source image defeats the structural-OCR
+        purpose of the export and bloats the payload.
+        """
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
+        content_bytes, _ = export_result(
+            self.ocr_result, ExportFormat.PDF, images=[Image.new("RGB", (1200, 1600), "red")]
+        )
+        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        # No images on any page.
+        for page in doc:
+            assert page.get_images(full=True) == [], (
+                "PDF export must not embed the source image; got "
+                f"{page.get_images(full=True)} on page {page.number + 1}"
+            )
+        doc.close()
+
+    def test_pdf_renders_recognized_text(self):
+        """All recognised line texts must appear in the PDF text layer."""
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
+        # Build a page large enough that the line bboxes (which go up
+        # to x=600 / y=132) sit entirely inside the page rect; the
+        # shared ``self.ocr_result`` fixture uses 200×300 which clips
+        # everything off-page and would mask any rendering errors.
+        result = OCRResult(
+            filename="test.jpg",
+            file_type="image",
+            model_used="experiment_B",
+            total_pages=1,
+            processing_time_ms=10.0,
+            pages=[PageResult(
+                page_number=1,
+                width=1200,
+                height=1600,
+                lines=list(self.ocr_result.pages[0].lines),
+            )],
+        )
+        content_bytes, _ = export_result(result, ExportFormat.PDF)
+        doc = fitz.open(stream=content_bytes, filetype="pdf")
+        page_text = doc[0].get_text("text")
+        for line in result.pages[0].lines:
+            assert line.text in page_text, (
+                f"recognised text {line.text!r} not present in the PDF"
+            )
+        doc.close()

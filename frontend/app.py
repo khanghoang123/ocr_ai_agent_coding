@@ -206,13 +206,14 @@ with st.sidebar:
 
     export_fmt = st.selectbox(
         "Export Format",
-        options=["txt", "json", "pdf"],
+        options=["pdf", "txt", "json"],
         index=0,
         help=(
-            "txt: plain text. "
-            "json: structured with bboxes and confidence. "
-            "pdf: searchable PDF with the original image as background "
-            "and per-line text overlaid at the detected coordinates."
+            "pdf (default): clean white-background PDF whose page size "
+            "matches the input image, with the recognised text rendered "
+            "in black at each line's detected coordinates. "
+            "txt: plain text, one line per detected line. "
+            "json: structured output with bboxes and confidence per line."
         ),
     )
 

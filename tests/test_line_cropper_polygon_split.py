@@ -164,3 +164,44 @@ def test_split_top_bottom_typed_returns_kind_label():
     closed = _kraken_style_closed_boundary()
     _, _, kind_closed = LineCropper._split_top_bottom_typed(closed)
     assert kind_closed == "closed"
+
+
+def test_polygon_background_mask_replaces_outside_pixels():
+    """Pixels outside the polygon must be replaced with paper colour
+    so neighbour-line bleed-in does not contaminate the recogniser.
+
+    Setup: a page with the *target* line on a white strip and a black
+    bar that crosses the warp's source quad just above the polygon.
+    Without masking, the rotated-rect crop will include the black bar
+    pixels (they sit inside the inflated quad). With masking, those
+    pixels are replaced with the polygon's interior median colour.
+    """
+    arr = np.full((100, 400, 3), 240, dtype=np.uint8)
+    # Black bar that fills the polygon padding region above the line.
+    arr[20:39, 50:380] = 0
+    # Light-grey "ink" inside the polygon at y=40..70 to give the mask
+    # something paper-coloured to extrapolate.
+    arr[40:70, 60:340] = 240
+    img = Image.fromarray(arr)
+    poly = np.array(
+        [[60, 40], [340, 40], [340, 70], [60, 70]], dtype=np.float32
+    )
+    masked = LineCropper(
+        min_height=8, min_width=20,
+        mask_polygon_background=True,
+        polygon_pad_v_ratio=0.6, polygon_pad_h_ratio=0.0,
+        mask_dilation_px=0,
+    ).warp_polygon(img, poly)
+    unmasked = LineCropper(
+        min_height=8, min_width=20,
+        mask_polygon_background=False,
+        polygon_pad_v_ratio=0.6, polygon_pad_h_ratio=0.0,
+    ).warp_polygon(img, poly)
+    assert masked is not None and unmasked is not None
+    # Padding extends the crop above the polygon, so the unmasked crop
+    # captures the black bar pixels and is appreciably darker than the
+    # masked crop, which should be near the paper colour.
+    assert masked.image.mean() > unmasked.image.mean() + 15, (
+        f"mask did not lift mean brightness enough: "
+        f"masked={masked.image.mean():.1f} unmasked={unmasked.image.mean():.1f}"
+    )
