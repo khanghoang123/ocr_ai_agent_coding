@@ -488,15 +488,15 @@ class TestOutputValidation:
         # 1-page PDF with text only is small but never empty.
         assert len(content_bytes) > 500
 
-    def test_pdf_page_size_matches_input_page_dimensions(self):
-        """PDF page size (in points) must equal the input image dimensions."""
+    def test_pdf_page_size_is_a4(self):
+        """PDF page size must be A4 (595x842 pt) for readability."""
         pytest.importorskip("reportlab")
         fitz = pytest.importorskip("fitz")
         content_bytes, _ = export_result(self.ocr_result, ExportFormat.PDF)
         doc = fitz.open(stream=content_bytes, filetype="pdf")
         page = doc[0]
-        assert int(round(page.rect.width)) == self.ocr_result.pages[0].width
-        assert int(round(page.rect.height)) == self.ocr_result.pages[0].height
+        assert int(round(page.rect.width)) == 595
+        assert int(round(page.rect.height)) == 842
         doc.close()
 
     def test_pdf_does_not_embed_source_image(self):

@@ -122,21 +122,23 @@ def _to_json(result: OCRResult) -> str:
 def _to_pdf(
     result: OCRResult, images: Optional[list[Image.Image]] = None
 ) -> bytes:
-    """Render the recognised text onto a clean white-background PDF.
+    """Render recognised text as a clean white-background PDF.
 
-    The output PDF mirrors the input image's geometry — page size in
-    points equals the input image's pixel dimensions, and each line is
-    rendered at its detected bounding-box position with a font size
-    scaled so the text fills the bbox horizontally (with a hard cap
-    at the bbox height to preserve vertical layout).
+    Layout strategy:
+    1. Use A4 page size for readability (not the raw image pixel size).
+    2. Compute a **uniform** font size from the median detected line
+       height so all body text has consistent sizing.
+    3. Place each line at a y-position derived from its detected bbox
+       centre, scaled proportionally onto the PDF page. A minimum gap
+       between consecutive lines prevents overlap.
+    4. Horizontally, text starts at a proportionally-scaled x offset
+       from the left margin, clamped so text stays within margins.
 
-    Crucially, the source image is **not** drawn as background: the
-    user-facing PDF must be a clean black-text-on-white-paper render
-    so it is usable as a structured transcription of the input.
+    The source image is **not** drawn as background: the PDF is a
+    clean black-text-on-white-paper transcription.
 
-    The ``images`` argument is kept for backward compatibility with
-    callers that still pass it; we only read each image's size as a
-    fallback when ``page.width`` / ``page.height`` are missing.
+    ``images`` is accepted for backward compatibility; image sizes are
+    used as a fallback when ``page.width`` / ``page.height`` are missing.
     """
     import io
 
@@ -152,52 +154,97 @@ def _to_pdf(
 
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     font_name = "DejaVuSans"
-    pdfmetrics.registerFont(TTFont(font_name, font_path))
+    try:
+        pdfmetrics.getFont(font_name)
+    except KeyError:
+        pdfmetrics.registerFont(TTFont(font_name, font_path))
+
+    # A4 page dimensions in points.
+    PAGE_W, PAGE_H = 595.0, 842.0
+    MARGIN_TOP = 50.0
+    MARGIN_BOTTOM = 50.0
+    MARGIN_LEFT = 50.0
+    MARGIN_RIGHT = 50.0
+    usable_w = PAGE_W - MARGIN_LEFT - MARGIN_RIGHT
+    usable_h = PAGE_H - MARGIN_TOP - MARGIN_BOTTOM
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf)
 
-    for i, page in enumerate(result.pages):
-        w = float(page.width or 0)
-        h = float(page.height or 0)
-        if (w <= 0 or h <= 0) and images and i < len(images):
-            w, h = float(images[i].width), float(images[i].height)
-        if w <= 0 or h <= 0:
-            # Defensive fallback: A4 portrait at 72 dpi.
-            w, h = 595.0, 842.0
+    for page_idx, page in enumerate(result.pages):
+        src_w = float(page.width or 0)
+        src_h = float(page.height or 0)
+        if (src_w <= 0 or src_h <= 0) and images and page_idx < len(images):
+            src_w = float(images[page_idx].width)
+            src_h = float(images[page_idx].height)
+        if src_w <= 0 or src_h <= 0:
+            src_w, src_h = PAGE_W, PAGE_H
 
-        c.setPageSize((w, h))
-        # Explicit white background — reportlab pages are nominally
-        # transparent, but some PDF viewers render that as black.
+        non_empty = [ln for ln in page.lines if (ln.text or "").strip()]
+        if not non_empty:
+            c.setPageSize((PAGE_W, PAGE_H))
+            c.setFillColorRGB(1.0, 1.0, 1.0)
+            c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+            c.showPage()
+            continue
+
+        # Compute uniform font size from median bbox height,
+        # scaled to the PDF coordinate space and clamped to a
+        # readable range.
+        bbox_heights = [float(ln.bbox.height) for ln in non_empty]
+        median_h = float(sorted(bbox_heights)[len(bbox_heights) // 2])
+        scale_y = usable_h / src_h
+        font_size = max(8.0, min(median_h * scale_y * 0.55, 14.0))
+        line_spacing = font_size * 1.45
+
+        c.setPageSize((PAGE_W, PAGE_H))
         c.setFillColorRGB(1.0, 1.0, 1.0)
-        c.rect(0, 0, w, h, fill=1, stroke=0)
+        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
         c.setFillColorRGB(0.0, 0.0, 0.0)
+        c.setFont(font_name, font_size)
 
-        for line in page.lines:
-            bbox = line.bbox
+        # Place lines at scaled y-positions with overlap prevention.
+        scale_x = usable_w / src_w
+        cursor_y = PAGE_H - MARGIN_TOP  # top of usable area
+
+        for line in non_empty:
             text = (line.text or "").strip()
-            if not text:
-                continue
-            # Vertical: cap font size at 90 % of the bbox height so
-            # ascenders/descenders fit cleanly within the line slot.
-            target_h = max(6.0, float(bbox.height) * 0.9)
-            font_size = target_h
-            # Horizontal: shrink the font size further if the text is
-            # wider than the bbox. This keeps each line within its
-            # detected horizontal slot, mirroring the input layout.
-            target_w = max(1.0, float(bbox.width))
-            text_w_at_target = pdfmetrics.stringWidth(text, font_name, font_size)
-            if text_w_at_target > target_w:
-                font_size *= target_w / text_w_at_target
-            font_size = max(4.0, font_size)
-            c.setFont(font_name, font_size)
-            # ReportLab origin is bottom-left; OCR bboxes are top-left.
-            # Place the text baseline near the bbox's bottom edge,
-            # offset upwards by ~20 % of the font size so the visible
-            # glyph body sits inside the bbox.
-            x = float(bbox.x1)
-            y = h - float(bbox.y2) + font_size * 0.2
-            c.drawString(x, y, text)
+            bbox = line.bbox
+
+            # Proportional x from the source page.
+            x = MARGIN_LEFT + float(bbox.x1) * scale_x
+            x = max(MARGIN_LEFT, min(x, PAGE_W - MARGIN_RIGHT - 20))
+
+            # Proportional y from the source page (top-left origin).
+            target_y_from_top = MARGIN_TOP + float(bbox.y1) * scale_y
+            target_y = PAGE_H - target_y_from_top
+
+            # Prevent overlap: never place above previous cursor.
+            y = min(target_y, cursor_y - line_spacing * 0.15)
+
+            # Page overflow: start new page if below bottom margin.
+            if y < MARGIN_BOTTOM:
+                c.showPage()
+                c.setPageSize((PAGE_W, PAGE_H))
+                c.setFillColorRGB(1.0, 1.0, 1.0)
+                c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+                c.setFillColorRGB(0.0, 0.0, 0.0)
+                c.setFont(font_name, font_size)
+                cursor_y = PAGE_H - MARGIN_TOP
+                y = cursor_y
+
+            # Shrink font if text is wider than available space.
+            avail_w = PAGE_W - MARGIN_RIGHT - x
+            text_w = pdfmetrics.stringWidth(text, font_name, font_size)
+            if text_w > avail_w and avail_w > 0:
+                adjusted = font_size * avail_w / text_w
+                c.setFont(font_name, max(6.0, adjusted))
+                c.drawString(x, y, text)
+                c.setFont(font_name, font_size)
+            else:
+                c.drawString(x, y, text)
+
+            cursor_y = y - line_spacing
 
         c.showPage()
 

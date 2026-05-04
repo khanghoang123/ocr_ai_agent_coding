@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     min_line_height: int = 8        # Minimum line height (px) — filters noise
     min_line_width: int = 20        # Minimum line width (px)
     row_tolerance_ratio: float = 0.5  # Row grouping tolerance (fraction of median height)
+    # Crop strategy: "basic" (fast, minimal processing) or "validated"
+    # (connected-component geometry tightening + ink-aware padding).
+    cropper_crop_strategy: str = "validated"
 
     # Polygon-level padding applied *before* the warp inside
     # ``LineCropper.warp_polygon``. Detectors that emit baseline-aware
@@ -124,13 +127,17 @@ class Settings(BaseSettings):
     # each line, leaving ascenders/descenders outside the polygon. The
     # ratios below extend the polygon along its long (text) and short
     # (line-height) axes so the recogniser sees the full glyphs.
-    cropper_polygon_pad_v_ratio: float = 0.22
+    cropper_polygon_pad_v_ratio: float = 0.10
     cropper_polygon_pad_h_ratio: float = 0.04
-    # Replace pixels outside the detected polygon with the paper colour
-    # before warping so neighbour-line bleed-in does not contaminate the
+    # Replace pixels outside the detected polygon with white before
+    # warping so neighbour-line bleed-in does not contaminate the
     # recogniser's input. Set to ``False`` to preserve raw pixels.
     cropper_mask_polygon_background: bool = True
-    cropper_mask_dilation_px: int = 3
+    cropper_mask_dilation_px: int = 5
+    # Use pure white (255) for the mask background instead of the
+    # estimated paper colour. Produces cleaner crops that match the
+    # recogniser's training distribution (black ink on white paper).
+    cropper_mask_use_white_background: bool = True
     # Prefer an axis-aligned slice over a perspective warp for polygons
     # whose principal angle is within ``cropper_horizontal_angle_tolerance_deg``
     # of horizontal. Avoids the sub-pixel edge curl introduced by
