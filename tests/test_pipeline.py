@@ -481,6 +481,7 @@ class TestOutputValidation:
 
     def test_pdf_export_returns_pdf_bytes(self):
         """PDF export must return a non-empty bytes payload starting with %PDF."""
+        pytest.importorskip("reportlab")
         content_bytes, mime = export_result(self.ocr_result, ExportFormat.PDF)
         assert mime == "application/pdf"
         assert content_bytes.startswith(b"%PDF"), "missing PDF magic bytes"
@@ -489,7 +490,8 @@ class TestOutputValidation:
 
     def test_pdf_page_size_matches_input_page_dimensions(self):
         """PDF page size (in points) must equal the input image dimensions."""
-        import fitz
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
         content_bytes, _ = export_result(self.ocr_result, ExportFormat.PDF)
         doc = fitz.open(stream=content_bytes, filetype="pdf")
         page = doc[0]
@@ -504,7 +506,8 @@ class TestOutputValidation:
         paper. Embedding the source image defeats the structural-OCR
         purpose of the export and bloats the payload.
         """
-        import fitz
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
         content_bytes, _ = export_result(
             self.ocr_result, ExportFormat.PDF, images=[Image.new("RGB", (1200, 1600), "red")]
         )
@@ -519,7 +522,8 @@ class TestOutputValidation:
 
     def test_pdf_renders_recognized_text(self):
         """All recognised line texts must appear in the PDF text layer."""
-        import fitz
+        pytest.importorskip("reportlab")
+        fitz = pytest.importorskip("fitz")
         # Build a page large enough that the line bboxes (which go up
         # to x=600 / y=132) sit entirely inside the page rect; the
         # shared ``self.ocr_result`` fixture uses 200×300 which clips
