@@ -35,6 +35,9 @@ class ExperimentConfig:
     vertical_padding_ratio: float = 0.35
     horizontal_padding_ratio: float = 0.60
     max_deskew_angle: float = 8.0
+    # Polygon-level padding applied before warp_polygon (see Settings).
+    polygon_pad_v_ratio: float = 0.22
+    polygon_pad_h_ratio: float = 0.04
     # Page-level document rectification (Phase 2C).
     # When `enable_document_perspective_correction=True`, the pipeline runs
     # a dewarping pass *before* line detection. `rectifier_backend` selects

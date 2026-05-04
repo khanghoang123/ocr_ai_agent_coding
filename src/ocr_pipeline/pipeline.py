@@ -431,6 +431,8 @@ class OCRPipeline:
                 vertical_padding_ratio=config.vertical_padding_ratio,
                 horizontal_padding_ratio=config.horizontal_padding_ratio,
                 max_deskew_angle=config.max_deskew_angle,
+                polygon_pad_v_ratio=config.polygon_pad_v_ratio,
+                polygon_pad_h_ratio=config.polygon_pad_h_ratio,
             ),
             recognizer=cls._build_recognizer(config, model_cfg, settings),
             reconstructor=LayoutReconstructor.from_settings(),

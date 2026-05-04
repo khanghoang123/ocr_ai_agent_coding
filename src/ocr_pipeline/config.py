@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     min_line_width: int = 20        # Minimum line width (px)
     row_tolerance_ratio: float = 0.5  # Row grouping tolerance (fraction of median height)
 
+    # Polygon-level padding applied *before* the warp inside
+    # ``LineCropper.warp_polygon``. Detectors that emit baseline-aware
+    # polygons (Kraken BLLA) tend to fit tight to the x-height band of
+    # each line, leaving ascenders/descenders outside the polygon. The
+    # ratios below extend the polygon along its long (text) and short
+    # (line-height) axes so the recogniser sees the full glyphs.
+    cropper_polygon_pad_v_ratio: float = 0.22
+    cropper_polygon_pad_h_ratio: float = 0.04
+
     # ── FastAPI settings ─────────────────────────────────────
     api_host: str = "0.0.0.0"
     api_port: int = 8000
