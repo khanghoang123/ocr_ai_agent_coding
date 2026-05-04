@@ -141,20 +141,23 @@ class LineCropper:
                 return None
         else:
             curve_score = self._calculate_curvature(poly)
+            crop = None
             if curve_score > 0.05:
+                # First try the polynomial unwarp; if it fails (e.g. the
+                # polynomial fit is ill-conditioned for closed boundaries
+                # where ascender/descender points dominate the edge fit),
+                # fall back to the minAreaRect-based path so the line is
+                # not silently dropped.
                 crop = self._crop_unwarp(img_np, poly, img_h, img_w)
-            else:
+            if crop is None:
                 rect = cv2.minAreaRect(poly)
                 box = cv2.boxPoints(rect)
                 if self.enable_rotated_crop:
                     quad = self._crop_quad(img_np, box, img_h, img_w)
-                    if quad is None:
-                        return None
-                    crop, crop_to_page, page_to_crop = quad
+                    if quad is not None:
+                        crop, crop_to_page, page_to_crop = quad
                 else:
                     crop = self._crop_axis_aligned(img_np, box, img_h, img_w)
-                    if crop is None:
-                        return None
 
         if crop is None:
             return None
@@ -177,27 +180,83 @@ class LineCropper:
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _calculate_curvature(self, poly: np.ndarray) -> float:
-        """Measure curvature by deviation from a baseline. Simple heuristic."""
-        # Split polygon into top and bottom halves ( Paddle poly is usually CW)
-        n = len(poly)
-        half = n // 2
-        top_pts = poly[:half]
-        
-        if len(top_pts) < 3:
+        """Measure curvature by deviation from a baseline. Simple heuristic.
+
+        ``poly`` may come from Paddle (CW-ordered 4-point quad), CRAFT
+        (top-edge then bottom-edge, point-symmetric), or Kraken BLLA (a
+        closed boundary tracing the entire line). For the first two, the
+        first-half-by-index *is* the top edge. For Kraken, the index-based
+        split mixes top and bottom points and produces a wildly inflated
+        curvature score, which then routes the polygon into ``_crop_unwarp``
+        where the same broken split makes the polynomial fit return
+        ``height < min_height`` and silently drops the line. Use the shared
+        ``_split_top_bottom`` helper to fall back to a y-median split for
+        closed boundaries.
+        """
+        top_pts, _ = self._split_top_bottom(poly)
+        if top_pts is None or len(top_pts) < 3:
             return 0.0
-        
-        # Fit a line to top points and check max distance
+
         x = top_pts[:, 0]
         y = top_pts[:, 1]
-        
-        # Linear fit (straight line)
+
+        # Linear fit (straight line).
         line_params = np.polyfit(x, y, 1)
         y_fit = np.polyval(line_params, x)
-        
-        # Mean absolute error normalized by height
+
+        # Mean absolute error normalised by height.
         mae = np.mean(np.abs(y - y_fit))
         height = np.max(y) - np.min(y) + 1e-6
         return mae / height
+
+    @staticmethod
+    def _split_top_bottom(
+        poly: np.ndarray,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Split a line polygon into top and bottom edge points.
+
+        For polygons that already store the top edge in the first half and
+        the bottom edge in the second half (Paddle, CRAFT, generic
+        unwarp-friendly polygons), return that index-based split. For
+        polygons that trace a closed boundary (Kraken BLLA, possibly other
+        baseline-aware segmenters), the index-based split mixes top and
+        bottom points; detect this by checking whether the index-based top
+        half stays strictly above the index-based bottom half, and fall
+        back to a y-median split when it doesn't.
+
+        Returns ``(top_pts, bottom_pts)`` sorted by x in both halves, or
+        ``(None, None)`` if either half ends up with fewer than two points.
+        """
+        n = len(poly)
+        if n < 4:
+            return None, None
+
+        if n % 2 == 0:
+            top_idx = poly[: n // 2]
+            bot_idx = poly[n // 2 :][::-1]
+            top_max_y = float(np.max(top_idx[:, 1]))
+            bot_min_y = float(np.min(bot_idx[:, 1]))
+            # Allow a small tolerance for ascender/descender overshoot.
+            tolerance = 0.1 * max(
+                float(np.max(poly[:, 1]) - np.min(poly[:, 1])),
+                1.0,
+            )
+            if top_max_y <= bot_min_y + tolerance:
+                # Sort each side by x so polynomial fits are well-conditioned.
+                top_idx = top_idx[np.argsort(top_idx[:, 0])]
+                bot_idx = bot_idx[np.argsort(bot_idx[:, 0])]
+                return top_idx, bot_idx
+            # Otherwise fall through to the y-median split below.
+
+        # Closed boundary or odd-cardinality polygon: split by y-median.
+        y_median = float(np.median(poly[:, 1]))
+        top_pts = poly[poly[:, 1] <= y_median]
+        bot_pts = poly[poly[:, 1] > y_median]
+        if len(top_pts) < 2 or len(bot_pts) < 2:
+            return None, None
+        top_pts = top_pts[np.argsort(top_pts[:, 0])]
+        bot_pts = bot_pts[np.argsort(bot_pts[:, 0])]
+        return top_pts, bot_pts
 
     def _crop_quad(
         self,
@@ -246,29 +305,17 @@ class LineCropper:
         img_h: int,
         img_w: int,
     ) -> np.ndarray | None:
-        """Polynomial unwarping for curved multi-point polygons."""
-        # 1. Identify top and bottom boundaries.
-        #    For Kraken/CRAFT, the polygon is a closed boundary with an odd
-        #    number of points, so we cannot simply split in half: top and
-        #    bottom would have different cardinalities and downstream array
-        #    arithmetic would broadcast-error. Instead, sort by x and bucket
-        #    by y-median.
-        n = len(poly)
-        if n < 4:
+        """Polynomial unwarping for curved multi-point polygons.
+
+        Uses the shared ``_split_top_bottom`` helper which falls back to a
+        y-median split for closed boundaries (Kraken BLLA). The previous
+        even-cardinality branch always split by index, which silently
+        produced a near-zero ``height`` when the polygon was a closed loop
+        and dropped the line via the ``height < min_height`` guard below.
+        """
+        top_pts, bot_pts = self._split_top_bottom(poly)
+        if top_pts is None or bot_pts is None:
             return None
-        if n % 2 == 0:
-            top_pts = poly[: n // 2]
-            bot_pts = poly[n // 2 :][::-1]
-        else:
-            # Closed boundary or off-by-one polygon — split along the y-median.
-            y_median = float(np.median(poly[:, 1]))
-            top_pts = poly[poly[:, 1] <= y_median]
-            bot_pts = poly[poly[:, 1] > y_median]
-            if len(top_pts) < 2 or len(bot_pts) < 2:
-                return None
-            # Sort by x so polynomial fitting is well-conditioned.
-            top_pts = top_pts[np.argsort(top_pts[:, 0])]
-            bot_pts = bot_pts[np.argsort(bot_pts[:, 0])]
 
         # 2. Fit polynomials to top and bottom
         t_x, t_y = top_pts[:, 0], top_pts[:, 1]

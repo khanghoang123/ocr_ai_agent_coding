@@ -18,6 +18,9 @@ paddleocr>=2.7.0
 
 # ----- PDF support (PyMuPDF — no poppler needed) -----
 pymupdf>=1.23.0
+# ReportLab is used by ocr_pipeline.exporters._to_pdf to render the
+# searchable-PDF export (background image + per-line text overlay).
+reportlab>=4.0.0
 
 # ----- FastAPI backend -----
 fastapi>=0.110.0

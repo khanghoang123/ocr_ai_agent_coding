@@ -5,7 +5,7 @@ from PIL import Image, ImageDraw
 
 from ocr_pipeline.cropper.line_cropper import LineCropper
 from ocr_pipeline.detector.paddle_detector import DetectionResult
-from ocr_pipeline.refiner.line_refiner import LineRefiner
+from ocr_pipeline.refiner.line_refiner import LineRefiner, _PageEntry
 
 
 def _polygon(x1: float, y1: float, x2: float, y2: float) -> np.ndarray:
@@ -128,3 +128,54 @@ def test_line_refiner_neighbor_fallback_clamps_non_overlapping_lines():
     assert result.decisions[1].neighbor_strategy == "overlap_or_distance"
     assert result.decisions[1].clamped_bbox is not None
     assert result.decisions[1].clamped_bbox[1] >= result.decisions[0].raw_polygon[:, 1].max()
+
+
+def _entry(x1: float, y1: float, x2: float, y2: float, idx: int = 0) -> _PageEntry:
+    bbox = (float(x1), float(y1), float(x2), float(y2))
+    return _PageEntry(
+        index=idx,
+        polygon=_polygon(x1, y1, x2, y2),
+        bbox=bbox,
+        center_y=(y1 + y2) / 2.0,
+        height=max(y2 - y1, 1.0),
+    )
+
+
+def test_merge_near_duplicate_bands_does_not_cascade_for_overlapping_lines():
+    """Regression: ascender/descender-rich polygons must not cascade-merge.
+
+    Detectors that emit closed-boundary polygons (Kraken BLLA, Surya)
+    routinely produce neighbouring line bboxes that overlap by 30-40%
+    of their height because each polygon spans both ascenders and
+    descenders. The previous merge logic treated any pair with
+    ``overlap_ratio >= 0.35`` or strongly-negative gap as duplicates
+    *regardless of resulting band height*, causing the merged band to
+    grow tall enough to overlap the next polygon, which collapsed the
+    entire page into a single band.
+    """
+    refiner = LineRefiner()
+    page_median = 41.0
+    # Eight neighbouring lines, each ~41px tall, line-to-line stride of
+    # 28px → adjacent bboxes overlap by ~13/40 = 0.33 (just below the
+    # old 0.35 threshold) but the merged pair would still cascade in
+    # the strongly-negative-gap branch.
+    entries = [_entry(40, 145 + 28 * i, 640, 186 + 28 * i, idx=i) for i in range(8)]
+    merged = refiner._merge_near_duplicate_bands(entries, page_median)
+    assert len(merged) == 8, (
+        f"merge cascaded over ascender/descender overlap: got {len(merged)} bands "
+        "for 8 distinct lines"
+    )
+
+
+def test_merge_near_duplicate_bands_still_merges_true_duplicates():
+    """The merge must still collapse genuinely-duplicate bands."""
+    refiner = LineRefiner()
+    page_median = 40.0
+    # Two near-identical bands at the same y range — combined height
+    # stays inside the envelope (≤ 1.45 × median = 58px).
+    entries = [
+        _entry(40, 100, 640, 140, idx=0),
+        _entry(45, 102, 638, 142, idx=1),
+    ]
+    merged = refiner._merge_near_duplicate_bands(entries, page_median)
+    assert len(merged) == 1
