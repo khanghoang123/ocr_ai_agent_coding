@@ -698,3 +698,126 @@ python scripts/run_detector_experiment.py --experiments E3_kraken_blla
 (The `experiments/runs/...` directory is gitignored by AGENTS.md
 guidance; only the report and the per-experiment summary tables ship in
 the PR.)
+
+## Phase 6 — Box-level / line-level CER & WER on `tests/test/`
+
+**Why.** Up to and including Phase 5, every metric in this report was a
+*heuristic* (`hallucinated_line_rate`, `garbage_text_ratio`, …): we never had
+ground-truth Vietnamese text per page, so it was impossible to claim
+"detector A produces a more accurate transcription than detector B" — only
+"detector A produces fewer suspicious-looking tokens". This phase fixes that
+by adding **transcription ground-truth** under [`tests/test_gt/`](../tests/test_gt/)
+and a CER / WER evaluation CLI in [`scripts/run_eval_cer_wer.py`](../scripts/run_eval_cer_wer.py).
+
+### What's annotated
+
+Three of the seven fixtures have GT in this PR:
+
+| image | GT quality | lines | notes |
+|---|---|---|---|
+| `thumb_1200_1698.png` | `verified` | 29 | Clean printed Vietnamese essay. Transcribed character-for-character. |
+| `soan-bai-tap-doc-…lop-5-2.jpg` | `verified` | 25 | Clean printed textbook page. Transcribed character-for-character. |
+| `chi_pheo_page.jpg` | `best_effort` | 28 | Handwritten Vietnamese essay (despite the file name, it's actually about Quang Dũng's "Tây Tiến"). Human-transcribed but minor diacritic / individual-word errors are possible. |
+
+The remaining four fixtures (`chiec_thuyen_ngoai_xa_page`,
+`chu_nguoi_tu_tu_page`, `essay_sample_page`, `lang_kim_lan_page_4`) are not
+yet annotated — they are all handwritten and require careful manual
+transcription. The format in [`tests/test_gt/README.md`](../tests/test_gt/README.md)
+is intentionally append-only so future PRs can extend coverage without
+breaking the eval CLI.
+
+### How CER / WER is computed
+
+Two metric families are reported per (experiment, image) pair:
+
+- **Page-level CER / WER** — concatenate predicted lines (in reading order
+  produced by the runner) and GT lines into a single page string, then
+  compute CER / WER with the existing NFC + collapsed-whitespace
+  normalisation in `src/ocr_pipeline/validation/metrics.py`. This is
+  detection-aware: a missed line raises both numbers because the GT page
+  string is longer than the prediction.
+
+- **Line-level matched CER / WER** — minimum-cost line assignment via the
+  Hungarian algorithm (`scipy.optimize.linear_sum_assignment`) using
+  edit-distance cost; unmatched lines (false positives or missed
+  detections) are penalised at CER = 1.0. This isolates recognition
+  quality from detection coverage, but no longer credits backends for
+  reading lines in correct order.
+
+### Result on the existing leaderboard run (`baseline_50k` recognizer)
+
+Re-running [`scripts/run_eval_cer_wer.py`](../scripts/run_eval_cer_wer.py)
+against `experiments/runs/phase3_detector_comparison_ftuned/` (Phase 4
+output: `baseline_50k` recognizer + `no_repeat_ngram_size=3`):
+
+#### Aggregate over `verified` GT only (n=2 — both printed pages)
+
+| experiment       | page_cer | page_wer | line_cer | line_wer |
+|------------------|----------|----------|----------|----------|
+| E0_paddle        | 1.04     | 1.64     | 1.09     | 1.68     |
+| E1_surya         | 1.05     | 1.63     | 1.10     | 1.68     |
+| E2_craft         | 0.87     | 1.39     | 1.02     | 1.57     |
+| **E3_kraken_blla** | **0.88** | **1.00** | **0.98** | **1.13** |
+
+#### Per-image page-level CER
+
+| image | E0_paddle | E1_surya | E2_craft | E3_kraken_blla |
+|---|---|---|---|---|
+| `thumb_1200_1698` (verified) | 1.02 | 1.03 | 1.01 | **0.97** |
+| `soan-bai…lop-5-2` (verified) | 1.05 | 1.07 | **0.74** | 0.78 |
+| `chi_pheo_page` (best_effort) | 0.80 | 0.79 | **0.75** | 0.77 |
+
+### Reading the numbers
+
+- **CER >> 1.0 is expected** at this stage — the public `vgg_seq2seq` is
+  fine-tuned on synthetic printed Vietnamese with very few real-page
+  characters, so the recognizer is the dominant error source. CER >1
+  means "predictions plus extraneous lines together exceed the GT
+  length"; on `thumb_1200_1698` Surya emits ~70 detections vs 29 GT
+  lines, dominated by tiny duplicate boxes that recognizer reads as
+  garbage tokens.
+
+- **CRAFT and Kraken split the wins.** CRAFT wins narrowly on
+  `soan-bai…lop-5-2` (densely-printed columns where its box-level
+  recall on individual words pays off); Kraken wins on `thumb_1200_1698`
+  (looser-spaced essay where its line-level baselines avoid the
+  per-word duplicate bands). Both of these printed pages are the only
+  fair tests we have for now because the GT is verified.
+
+- **Aggregate WER is the cleanest single signal.** Kraken's
+  `page_wer = 1.00` is materially below the others (1.39–1.64) because
+  its line-level boxes avoid the multi-band hallucinations that drive
+  Paddle / Surya per-word repetition. This corroborates the
+  detector-geometry winner from Phase 3 (`full_width_band_rate`,
+  `mean_distinct_x1_per_page`).
+
+- **Numbers on `chi_pheo_page` are directional, not exact.** The
+  human-transcribed handwriting GT is `best_effort`; the eval CLI
+  reports it under "all GT" but excludes it from the `verified` aggregate
+  table.
+
+### Reproducing
+
+```sh
+# 1. (Optional) re-run the leaderboard. The PR ships the existing run.
+python scripts/run_detector_experiment.py \
+    --output-dir experiments/runs/phase3_detector_comparison_ftuned \
+    --model-key baseline_50k
+
+# 2. Compute CER / WER against tests/test_gt/.
+python scripts/run_eval_cer_wer.py \
+    --run-dir experiments/runs/phase3_detector_comparison_ftuned \
+    --gt-dir  tests/test_gt
+# Writes <run-dir>/cer_wer.json and <run-dir>/cer_wer.md.
+```
+
+### What's structurally fixed by this phase
+
+Before this PR, every leaderboard metric was a heuristic that *could not be
+wrong about the rank* but *could be wrong about the absolute number* (e.g.
+`hallucinated_line_rate` doubles when the recognizer becomes more fluent
+because the heuristic looks for short garbage runs). Page-level CER / WER
+against `verified` GT is **structurally correct**: it goes to zero iff the
+predicted page text matches the reference exactly. Future recognizer or
+detector changes can now be measured directly against this floor instead of
+inferred from heuristic deltas.
