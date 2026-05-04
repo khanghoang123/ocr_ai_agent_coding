@@ -206,9 +206,14 @@ with st.sidebar:
 
     export_fmt = st.selectbox(
         "Export Format",
-        options=["txt", "json"],
+        options=["txt", "json", "pdf"],
         index=0,
-        help="txt: plain text. json: structured with bboxes and confidence.",
+        help=(
+            "txt: plain text. "
+            "json: structured with bboxes and confidence. "
+            "pdf: searchable PDF with the original image as background "
+            "and per-line text overlaid at the detected coordinates."
+        ),
     )
 
     show_bboxes = st.toggle("Show bounding boxes", value=True)
@@ -542,12 +547,22 @@ with dl_col1:
         )
         if export_response.ok:
             ext = "zip" if len(uploaded_files) > 1 else export_fmt
-            dl_filename = "ocr_results.zip" if len(uploaded_files) > 1 else f"ocr_result.{export_fmt}"
+            dl_filename = (
+                "ocr_results.zip"
+                if len(uploaded_files) > 1
+                else f"ocr_result.{export_fmt}"
+            )
+            mime_by_ext = {
+                "zip": "application/zip",
+                "txt": "text/plain",
+                "json": "application/json",
+                "pdf": "application/pdf",
+            }
             st.download_button(
                 label=f"⬇️ Download as .{ext}",
                 data=export_response.content,
                 file_name=dl_filename,
-                mime="application/zip" if ext == "zip" else "text/plain",
+                mime=mime_by_ext.get(ext, "application/octet-stream"),
                 width="stretch",
             )
     except Exception as exc:

@@ -66,6 +66,8 @@ class LineCropper:
         vertical_padding_ratio: float = 0.35,
         horizontal_padding_ratio: float = 0.60,
         max_deskew_angle: float = 8.0,
+        polygon_pad_v_ratio: float = 0.22,
+        polygon_pad_h_ratio: float = 0.04,
     ):
         self.min_height = min_height
         self.min_width = min_width
@@ -82,6 +84,16 @@ class LineCropper:
         self.vertical_padding_ratio = vertical_padding_ratio
         self.horizontal_padding_ratio = horizontal_padding_ratio
         self.max_deskew_angle = max_deskew_angle
+        # Polygon-level padding applied *before* warping so the crop
+        # captures original-image pixels around the polygon (ascenders,
+        # descenders, leading whitespace). Detectors that emit baseline
+        # polygons (Kraken BLLA) tend to fit tight around the x-height
+        # band; without this padding the recogniser sees clipped
+        # ascenders/descenders and accuracy drops sharply on Vietnamese
+        # diacritics. Applied via ``_inflate_rect`` in the rotated-rect
+        # path and via ``_crop_axis_aligned`` for the axis-aligned path.
+        self.polygon_pad_v_ratio = max(0.0, float(polygon_pad_v_ratio))
+        self.polygon_pad_h_ratio = max(0.0, float(polygon_pad_h_ratio))
         self.page_median_line_height: float | None = None
 
     def crop_all(
@@ -123,41 +135,58 @@ class LineCropper:
         image: Image.Image,
         polygon: np.ndarray,
     ) -> WarpedPolygonCrop | None:
-        """Warp a detected polygon into a local crop without OCR-specific padding."""
+        """Warp a detected polygon into a local crop.
+
+        Polygon-level padding (``polygon_pad_v_ratio`` /
+        ``polygon_pad_h_ratio``) is applied *before* the warp so the
+        crop captures original-image pixels around the polygon (ascenders,
+        descenders, leading whitespace). Detectors that emit baseline
+        polygons (Kraken BLLA) are routed through ``minAreaRect`` instead
+        of the polynomial unwarp, because the closed-boundary geometry
+        does not give a stable ``y = f(x)`` for either edge and the
+        polynomial fit produced visibly distorted crops in earlier runs.
+        """
         img_np = np.array(image)
         img_h, img_w = img_np.shape[:2]
         poly = polygon.reshape(-1, 2).astype(np.float32)
 
+        pad_v = self.polygon_pad_v_ratio
+        pad_h = self.polygon_pad_h_ratio
+
         crop_to_page = None
         page_to_crop = None
         if len(poly) == 4 and self.enable_rotated_crop:
-            quad = self._crop_quad(img_np, poly, img_h, img_w)
+            quad = self._crop_quad(img_np, poly, img_h, img_w, pad_v, pad_h)
             if quad is None:
                 return None
             crop, crop_to_page, page_to_crop = quad
         elif len(poly) == 4:
-            crop = self._crop_axis_aligned(img_np, poly, img_h, img_w)
+            crop = self._crop_axis_aligned(img_np, poly, img_h, img_w, pad_v, pad_h)
             if crop is None:
                 return None
         else:
+            _, _, kind = self._split_top_bottom_typed(poly)
             curve_score = self._calculate_curvature(poly)
             crop = None
-            if curve_score > 0.05:
-                # First try the polynomial unwarp; if it fails (e.g. the
-                # polynomial fit is ill-conditioned for closed boundaries
-                # where ascender/descender points dominate the edge fit),
-                # fall back to the minAreaRect-based path so the line is
-                # not silently dropped.
+            # Polynomial unwarp is only safe for index-style polygons
+            # (Paddle / CRAFT) with high curvature. Closed-boundary
+            # polygons (Kraken BLLA) routinely trigger ill-conditioned
+            # polynomial fits whose remap target falls outside the
+            # image, producing visibly distorted crops; route them
+            # straight to the minAreaRect path.
+            if kind == "index" and curve_score > 0.05:
                 crop = self._crop_unwarp(img_np, poly, img_h, img_w)
             if crop is None:
                 rect = cv2.minAreaRect(poly)
                 box = cv2.boxPoints(rect)
                 if self.enable_rotated_crop:
-                    quad = self._crop_quad(img_np, box, img_h, img_w)
+                    quad = self._crop_quad(img_np, box, img_h, img_w, pad_v, pad_h)
                     if quad is not None:
                         crop, crop_to_page, page_to_crop = quad
                 else:
-                    crop = self._crop_axis_aligned(img_np, box, img_h, img_w)
+                    crop = self._crop_axis_aligned(
+                        img_np, box, img_h, img_w, pad_v, pad_h
+                    )
 
         if crop is None:
             return None
@@ -213,23 +242,34 @@ class LineCropper:
     def _split_top_bottom(
         poly: np.ndarray,
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Compatibility wrapper: returns just (top, bottom)."""
+        top, bot, _ = LineCropper._split_top_bottom_typed(poly)
+        return top, bot
+
+    @staticmethod
+    def _split_top_bottom_typed(
+        poly: np.ndarray,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, str]:
         """Split a line polygon into top and bottom edge points.
 
-        For polygons that already store the top edge in the first half and
-        the bottom edge in the second half (Paddle, CRAFT, generic
-        unwarp-friendly polygons), return that index-based split. For
-        polygons that trace a closed boundary (Kraken BLLA, possibly other
-        baseline-aware segmenters), the index-based split mixes top and
-        bottom points; detect this by checking whether the index-based top
-        half stays strictly above the index-based bottom half, and fall
-        back to a y-median split when it doesn't.
+        Returns ``(top_pts, bottom_pts, kind)`` where ``kind`` is one of:
+          * ``"index"``  — Paddle / CRAFT-style polygon where the first
+            half (by index) is the actual top edge. Polynomial unwarp is
+            safe for these.
+          * ``"closed"`` — Kraken BLLA-style closed boundary that traces
+            the whole line perimeter. The y-median split below recovers
+            top and bottom edge points, but the polynomial unwarp is
+            unstable on these polygons (the points are not a clean
+            function ``y = f(x)`` on either side); callers should route
+            these to ``minAreaRect`` instead.
+          * ``"none"`` — polygon does not have enough points to split;
+            both sides are ``None``.
 
-        Returns ``(top_pts, bottom_pts)`` sorted by x in both halves, or
-        ``(None, None)`` if either half ends up with fewer than two points.
+        The split itself is always returned sorted by x for both sides.
         """
         n = len(poly)
         if n < 4:
-            return None, None
+            return None, None, "none"
 
         if n % 2 == 0:
             top_idx = poly[: n // 2]
@@ -245,7 +285,7 @@ class LineCropper:
                 # Sort each side by x so polynomial fits are well-conditioned.
                 top_idx = top_idx[np.argsort(top_idx[:, 0])]
                 bot_idx = bot_idx[np.argsort(bot_idx[:, 0])]
-                return top_idx, bot_idx
+                return top_idx, bot_idx, "index"
             # Otherwise fall through to the y-median split below.
 
         # Closed boundary or odd-cardinality polygon: split by y-median.
@@ -253,10 +293,45 @@ class LineCropper:
         top_pts = poly[poly[:, 1] <= y_median]
         bot_pts = poly[poly[:, 1] > y_median]
         if len(top_pts) < 2 or len(bot_pts) < 2:
-            return None, None
+            return None, None, "none"
         top_pts = top_pts[np.argsort(top_pts[:, 0])]
         bot_pts = bot_pts[np.argsort(bot_pts[:, 0])]
-        return top_pts, bot_pts
+        return top_pts, bot_pts, "closed"
+
+    def _inflate_quad(
+        self,
+        pts: np.ndarray,
+        pad_v_ratio: float,
+        pad_h_ratio: float,
+    ) -> np.ndarray:
+        """Expand a 4-point quad outward by ratios along its short/long axes.
+
+        The long axis is the text direction (top-edge / bottom-edge),
+        so ``pad_h_ratio`` extends the line horizontally; the short axis
+        is line height, so ``pad_v_ratio`` extends to capture
+        ascenders/descenders.
+        """
+        pts = self._order_points(pts.reshape(4, 2))
+        tl, tr, br, bl = pts
+        top = tr - tl
+        bot = br - bl
+        left = bl - tl
+        right = br - tr
+        long_w = float(max(np.linalg.norm(top), np.linalg.norm(bot)))
+        short_h = float(max(np.linalg.norm(left), np.linalg.norm(right)))
+        if long_w < 1e-3 or short_h < 1e-3:
+            return pts.astype(np.float32)
+        u_long_top = top / max(np.linalg.norm(top), 1e-3)
+        u_long_bot = bot / max(np.linalg.norm(bot), 1e-3)
+        u_short_left = left / max(np.linalg.norm(left), 1e-3)
+        u_short_right = right / max(np.linalg.norm(right), 1e-3)
+        pad_h = pad_h_ratio * long_w
+        pad_v = pad_v_ratio * short_h
+        new_tl = tl - u_long_top * pad_h - u_short_left * pad_v
+        new_tr = tr + u_long_top * pad_h - u_short_right * pad_v
+        new_br = br + u_long_bot * pad_h + u_short_right * pad_v
+        new_bl = bl - u_long_bot * pad_h + u_short_left * pad_v
+        return np.stack([new_tl, new_tr, new_br, new_bl], axis=0).astype(np.float32)
 
     def _crop_quad(
         self,
@@ -264,9 +339,20 @@ class LineCropper:
         pts: np.ndarray,
         img_h: int,
         img_w: int,
+        pad_v_ratio: float = 0.0,
+        pad_h_ratio: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """Standard perspective transform for 4-point quadrilaterals."""
+        """Standard perspective transform for 4-point quadrilaterals.
+
+        ``pad_v_ratio`` / ``pad_h_ratio`` (when > 0) inflate the quad
+        along its short / long axes *before* the warp so the output crop
+        captures original-image pixels around the polygon (ascenders,
+        descenders, leading whitespace).
+        """
         pts = self._order_points(pts.reshape(4, 2))
+        if pad_v_ratio > 0 or pad_h_ratio > 0:
+            pts = self._inflate_quad(pts, pad_v_ratio, pad_h_ratio)
+            pts = self._clip_quad(pts, img_h, img_w)
 
         # Output dims
         width  = max(int(np.linalg.norm(pts[1] - pts[0])), int(np.linalg.norm(pts[2] - pts[3])))
@@ -282,18 +368,41 @@ class LineCropper:
         crop_to_page = cv2.getPerspectiveTransform(dst_pts, pts.astype(np.float32))
         return crop, crop_to_page, page_to_crop
 
+    @staticmethod
+    def _clip_quad(pts: np.ndarray, img_h: int, img_w: int) -> np.ndarray:
+        """Clip a 4-point quad to image bounds without reordering."""
+        clipped = pts.copy().astype(np.float32)
+        clipped[:, 0] = np.clip(clipped[:, 0], 0, img_w - 1)
+        clipped[:, 1] = np.clip(clipped[:, 1], 0, img_h - 1)
+        return clipped
+
     def _crop_axis_aligned(
         self,
         img_np: np.ndarray,
         pts: np.ndarray,
         img_h: int,
         img_w: int,
+        pad_v_ratio: float = 0.0,
+        pad_h_ratio: float = 0.0,
     ) -> np.ndarray | None:
         pts = pts.reshape(-1, 2).astype(np.float32)
-        x0 = max(0, int(np.floor(np.min(pts[:, 0]))))
-        y0 = max(0, int(np.floor(np.min(pts[:, 1]))))
-        x1 = min(img_w, int(np.ceil(np.max(pts[:, 0]))))
-        y1 = min(img_h, int(np.ceil(np.max(pts[:, 1]))))
+        x0f = float(np.min(pts[:, 0]))
+        y0f = float(np.min(pts[:, 1]))
+        x1f = float(np.max(pts[:, 0]))
+        y1f = float(np.max(pts[:, 1]))
+        if pad_v_ratio > 0 or pad_h_ratio > 0:
+            line_h = max(y1f - y0f, 1.0)
+            line_w = max(x1f - x0f, 1.0)
+            pad_v = line_h * pad_v_ratio
+            pad_h = line_w * pad_h_ratio
+            x0f -= pad_h
+            y0f -= pad_v
+            x1f += pad_h
+            y1f += pad_v
+        x0 = max(0, int(np.floor(x0f)))
+        y0 = max(0, int(np.floor(y0f)))
+        x1 = min(img_w, int(np.ceil(x1f)))
+        y1 = min(img_h, int(np.ceil(y1f)))
         if y1 - y0 < self.min_height or x1 - x0 < self.min_width:
             return None
         return img_np[y0:y1, x0:x1]
@@ -627,4 +736,6 @@ class LineCropper:
             min_height=settings.min_line_height,
             min_width=settings.min_line_width,
             padding=settings.crop_padding,
+            polygon_pad_v_ratio=settings.cropper_polygon_pad_v_ratio,
+            polygon_pad_h_ratio=settings.cropper_polygon_pad_h_ratio,
         )

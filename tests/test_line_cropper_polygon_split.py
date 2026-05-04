@@ -117,3 +117,50 @@ def test_warp_polygon_still_works_for_paddle_quad():
     warped = cropper.warp_polygon(img, poly)
     assert warped is not None
     assert warped.image.shape[0] >= cropper.min_height
+
+
+def test_polygon_padding_inflates_quad_crop_dimensions():
+    """Polygon-level padding must enlarge the output crop versus no padding.
+
+    The recogniser was getting visibly tight crops on Kraken polygons
+    (ascenders/descenders clipped). The fix adds polygon-level padding
+    *before* the warp so the crop captures pixels around the polygon.
+    """
+    img = _make_image()
+    poly = _paddle_style_quad()
+    base = LineCropper(
+        min_height=8, min_width=20,
+        polygon_pad_v_ratio=0.0, polygon_pad_h_ratio=0.0,
+    )
+    padded = LineCropper(
+        min_height=8, min_width=20,
+        polygon_pad_v_ratio=0.4, polygon_pad_h_ratio=0.1,
+    )
+    base_crop = base.warp_polygon(img, poly)
+    pad_crop = padded.warp_polygon(img, poly)
+    assert base_crop is not None and pad_crop is not None
+    # height grows by ~80% of the line height, width by ~20%
+    assert pad_crop.image.shape[0] > base_crop.image.shape[0]
+    assert pad_crop.image.shape[1] > base_crop.image.shape[1]
+
+
+def test_split_top_bottom_typed_returns_kind_label():
+    """warp_polygon relies on the typed split to skip the polynomial
+    unwarp on closed-boundary polygons; the kind label must distinguish
+    Paddle/CRAFT-style polys from Kraken-style closed boundaries."""
+    # Paddle/CRAFT polygons walk the top edge left→right then the bottom
+    # edge right→left, so the index split puts every top point in the
+    # first half and every bottom point in the second half.
+    paddle = np.array(
+        [
+            [10, 10], [40, 10], [70, 10], [110, 10],   # top edge
+            [110, 40], [70, 40], [40, 40], [10, 40],   # bottom edge
+        ],
+        dtype=np.float32,
+    )
+    _, _, kind_idx = LineCropper._split_top_bottom_typed(paddle)
+    assert kind_idx == "index"
+
+    closed = _kraken_style_closed_boundary()
+    _, _, kind_closed = LineCropper._split_top_bottom_typed(closed)
+    assert kind_closed == "closed"
