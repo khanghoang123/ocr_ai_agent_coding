@@ -66,11 +66,12 @@ class LineCropper:
         vertical_padding_ratio: float = 0.35,
         horizontal_padding_ratio: float = 0.60,
         max_deskew_angle: float = 8.0,
-        polygon_pad_v_ratio: float = 0.22,
+        polygon_pad_v_ratio: float = 0.10,
         polygon_pad_h_ratio: float = 0.04,
         mask_polygon_background: bool = True,
         mask_background_color: tuple[int, int, int] | None = None,
-        mask_dilation_px: int = 3,
+        mask_dilation_px: int = 5,
+        mask_use_white_background: bool = True,
         prefer_axis_aligned_for_horizontal: bool = True,
         horizontal_angle_tolerance_deg: float = 4.0,
     ):
@@ -109,6 +110,7 @@ class LineCropper:
         self.mask_polygon_background = bool(mask_polygon_background)
         self.mask_background_color = mask_background_color
         self.mask_dilation_px = max(0, int(mask_dilation_px))
+        self.mask_use_white_background = bool(mask_use_white_background)
         # Routing heuristic: when the polygon's principal orientation
         # is within ``horizontal_angle_tolerance_deg`` of horizontal,
         # prefer an axis-aligned crop over the perspective warp from
@@ -263,7 +265,10 @@ class LineCropper:
         # recogniser's input. The masked image is only used as the
         # warp source — we never overwrite the original ``image``.
         if self.mask_polygon_background and len(poly) >= 3:
-            paper = self._estimate_paper_color(img_np, poly)
+            if self.mask_use_white_background:
+                paper = np.array([255, 255, 255], dtype=np.uint8)
+            else:
+                paper = self._estimate_paper_color(img_np, poly)
             warp_src = self._mask_outside_polygon(img_np, poly, paper)
         else:
             warp_src = img_np
@@ -872,10 +877,12 @@ class LineCropper:
             min_height=settings.min_line_height,
             min_width=settings.min_line_width,
             padding=settings.crop_padding,
+            crop_strategy=settings.cropper_crop_strategy,
             polygon_pad_v_ratio=settings.cropper_polygon_pad_v_ratio,
             polygon_pad_h_ratio=settings.cropper_polygon_pad_h_ratio,
             mask_polygon_background=settings.cropper_mask_polygon_background,
             mask_dilation_px=settings.cropper_mask_dilation_px,
+            mask_use_white_background=settings.cropper_mask_use_white_background,
             prefer_axis_aligned_for_horizontal=settings.cropper_prefer_axis_aligned_for_horizontal,
             horizontal_angle_tolerance_deg=settings.cropper_horizontal_angle_tolerance_deg,
         )
